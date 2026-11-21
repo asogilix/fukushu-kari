@@ -1,12 +1,28 @@
 import * as db from './db.js';
-import { daysBetween, duePhotos, localDay, nextReviewRefresh, retrievability, reviewIsDue, upcomingCount } from './review.js';
-import { button, description, dialog, el, folderSelect, formatDateTime, heading, labeled, link, photoZoom } from './ui.js';
+import { canHaveChildren, folderCounts, folderIdsInBranch, folderLocations, folderMenuItems, folderTree } from './folders.js';
+import { normalizePhotoTags, PHOTO_SORTS, selectPhotos, TAGS } from './photo-options.js';
+import { viewerPhotoIds } from './photo-viewer-logic.js';
+import { duePhotos, nextReviewRefresh, retrievability, reviewIsDue } from './review.js';
+import {
+  actionSheet, button, dialog, el, folderSelect, formatDateTime, heading, labeled, link,
+  photoPreview, photoSource, photoTagButtons, tagDot
+} from './ui.js';
+import { folderImport } from './workflow.js';
 
-export function sortedFolders(folders) {
-  return folders.sort((a, b) => a.createdAt - b.createdAt || a.name.localeCompare(b.name, 'ja'));
+const COLLAPSED_FOLDERS = 'review-photo-album:collapsed-folders';
+let closedFolders;
+
+function readClosedFolders() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(COLLAPSED_FOLDERS));
+    if (Array.isArray(saved)) return new Set(saved.filter(id => typeof id === 'string'));
+  } catch {
+    // A fresh view starts expanded if storage cannot be read.
+  }
+  return new Set();
 }
 
-async function editFolder(ctx, folder) {
+async function editFolder(ctx, { folder, parent, locations }) {
   const input = el('input', {
     type: 'text', value: folder?.name ?? '', maxLength: 60, required: true, autofocus: true
   });
@@ -16,84 +32,93 @@ async function editFolder(ctx, folder) {
     input.value = input.value.trim();
     input.setCustomValidity(input.value ? '' : 'フォルダの名前を入れてください。');
   };
-  const choice = await dialog(folder ? '名前を変える' : 'フォルダを作る', labeled('フォルダの名前', input),
-    [['やめる', ''], ['保存する', 'save', 'button primary']]);
+  const place = locations && el('select', {}, locations.map(({ value, label }) => el('option', { value }, label)));
+  const title = folder ? '名前を変える' : parent ? 'この中にフォルダを作る' : 'フォルダを作る';
+  const choice = await dialog(title, [
+    labeled('フォルダの名前', input),
+    place && labeled('作る場所', place)
+  ], [['やめる', ''], [folder ? '保存する' : '作る', 'save', 'button primary']]);
   if (!choice || !input.value.trim()) return;
-  const record = folder ?? { id: crypto.randomUUID(), createdAt: Date.now() };
-  await db.saveFolder({ ...record, name: input.value.trim() });
+  const name = input.value.trim();
+  if (folder) await db.renameFolder(folder.id, name);
+  else await db.createFolder({
+    id: crypto.randomUUID(), name, createdAt: Date.now(), parentId: parent?.id ?? (place?.value || null)
+  });
   ctx.notify(folder ? '名前を変えました。' : 'フォルダを作りました。');
   ctx.refresh();
 }
 
-export function backupAge(last, today = localDay()) {
-  if (!last) return { text: '最後のバックアップ：まだありません', old: false };
-  const days = Math.max(0, daysBetween(last, today));
-  return { text: `最後のバックアップ：${days ? `${days}日前` : '今日'}`, old: days >= 14 };
+function folderRow(folder, { total, due }, child = false) {
+  const markClass = folder.id === db.DEFAULT_FOLDER ? 'folder-mark folder-mark-unfiled' : 'folder-mark';
+  return el('a', { className: 'folder-row', href: `#folder/${folder.id}` },
+    el('span', { className: markClass, 'aria-hidden': 'true' }),
+    el(child ? 'span' : 'strong', { className: 'folder-name' }, folder.name),
+    due > 0 && el('span', { className: 'folder-due' },
+      el('span', { className: 'visually-hidden' }, '今の復習 '), String(due),
+      el('span', { className: 'visually-hidden' }, '枚')),
+    el('span', { className: 'folder-total' },
+      el('span', { className: 'visually-hidden' }, '写真 '), `${total}枚`));
+}
+
+function childFolderList(folders, counts) {
+  return el('ul', { className: 'folder-list child-folders' },
+    folders.map(folder => el('li', {}, folderRow(folder, counts.get(folder.id), true))));
+}
+
+function homeFolderList(folders, counts) {
+  const collapsed = closedFolders ??= readClosedFolders();
+  return el('ul', { className: 'folder-list' }, folderTree(folders).map(({ folder, children }) => {
+    const row = folderRow(folder, counts.get(folder.id));
+    if (!children.length) return el('li', { className: 'folder-leaf' }, row);
+    const childList = childFolderList(children, counts);
+    childList.id = `children-${folder.id}`;
+    const toggle = button('', () => {
+      if (collapsed.has(folder.id)) collapsed.delete(folder.id);
+      else collapsed.add(folder.id);
+      update();
+      try {
+        localStorage.setItem(COLLAPSED_FOLDERS, JSON.stringify([...collapsed]));
+      } catch {
+        // Keep the current view usable if the browser blocks storage.
+      }
+    }, 'folder-toggle');
+    toggle.setAttribute('aria-controls', childList.id);
+    function update() {
+      const open = !collapsed.has(folder.id);
+      childList.hidden = !open;
+      toggle.setAttribute('aria-expanded', String(open));
+      toggle.setAttribute('aria-label', `${folder.name}の中を${open ? '閉じる' : '開く'}`);
+    }
+    update();
+    return el('li', {}, el('div', { className: 'folder-branch' }, toggle, row), childList);
+  }));
 }
 
 export async function renderHome(ctx, _id, scope) {
-  const [folders, photos, last] = await Promise.all([
-    db.listFolders(), db.listPhotos(), db.getSetting('lastBackup')
-  ]);
-  sortedFolders(folders);
+  const [folders, photos] = await Promise.all([db.listFolders(), db.listPhotos()]);
   const now = new Date();
-  const filter = folderSelect(folders, ctx.reviewFolder, true);
-  const title = el('span', { className: 'hero-title' }, '今の復習');
-  const amount = el('span', { className: 'hero-count' });
-  const caption = el('span', { className: 'hero-caption' });
-  const begin = el('button', { type: 'button', className: 'review-hero' },
-    el('span', { className: 'calendar-mark', 'aria-hidden': 'true' }),
-    el('span', { className: 'hero-copy' }, title, amount, caption));
-  const upcoming = el('p', { className: 'review-upcoming' });
-  function updateCount() {
-    ctx.reviewFolder = filter.value;
-    const time = new Date();
-    const count = photos.filter(photo => reviewIsDue(photo, time, filter.value)).length;
-    amount.replaceChildren(el('strong', {}, String(count)), '枚');
-    caption.textContent = count ? '復習を始める' : '復習する写真はありません';
-    upcoming.textContent = `今日このあと ${upcomingCount(photos, time, filter.value)}枚`;
-    begin.disabled = count === 0;
-  }
-  begin.onclick = ctx.guard(async () => {
-    const queue = duePhotos(await db.listPhotos(), new Date(), filter.value);
-    if (!queue.length) {
-      ctx.notify('今、復習する写真はありません。');
-      ctx.refresh();
-      return;
-    }
-    ctx.startReview(queue, folders.find(folder => folder.id === filter.value));
-  });
-  filter.onchange = updateCount;
-  updateCount();
+  const count = photos.filter(photo => reviewIsDue(photo, now)).length;
+  const begin = button('始める', ctx.guard(async () => {
+    const queue = duePhotos(await db.listPhotos(), new Date());
+    if (!scope.current()) return;
+    if (queue.length) ctx.startReview(queue);
+    else ctx.refresh();
+  }), 'button primary small');
+  begin.disabled = count === 0;
   scope.refreshAt(nextReviewRefresh(photos, now));
-
-  const counts = new Map(folders.map(folder => [folder.id, { total: 0, due: 0 }]));
-  for (const photo of photos) {
-    const count = counts.get(photo.folderId);
-    if (!count) continue;
-    count.total++;
-    if (reviewIsDue(photo, now)) count.due++;
-  }
-  const folio = folders.map(folder => {
-    const count = counts.get(folder.id);
-    return el('li', {}, el('a', { className: 'folder-row', href: `#folder/${folder.id}` },
-      el('span', { className: 'folder-mark', 'aria-hidden': 'true' }),
-      el('span', { className: 'folder-info' },
-        el('strong', {}, folder.name), el('span', { className: 'muted' }, `${count.total}枚`)),
-      el('span', { className: count.due ? 'pill due' : 'pill' }, `今の復習 ${count.due}枚`)));
-  });
-  const age = backupAge(last, localDay(now));
+  const stripClass = count === 0 ? 'review-strip review-strip-empty' : 'review-strip';
   return [
-    el('section', { 'aria-label': '今の復習' }, begin, upcoming,
-      el('div', { className: 'review-filter' }, labeled('復習するフォルダ', filter))),
+    el('section', { className: stripClass, 'aria-labelledby': 'review-title' },
+      el('span', { className: 'calendar-mark', 'aria-hidden': 'true' }),
+      el('div', { className: 'review-strip-copy' },
+        el('h1', { id: 'review-title' }, '今の復習'),
+        count > 0 ? el('strong', { className: 'review-strip-count' }, String(count), el('span', {}, '枚')) :
+          el('p', { className: 'muted' }, '今は復習する写真はありません')),
+      begin),
     el('section', { className: 'section', 'aria-labelledby': 'folders-title' },
-      el('div', { className: 'section-heading' }, el('h1', { id: 'folders-title' }, 'フォルダ'),
-        button('フォルダを作る', ctx.guard(() => editFolder(ctx)), 'button small')),
-      el('ul', { className: 'folder-list' }, folio)),
-    el('section', { className: `backup-card${age.old ? ' old' : ''}` },
-      el('div', {}, el('p', {}, age.text),
-        age.old && description('そろそろ新しいバックアップを作っておくと安心です。')),
-      link('バックアップ', '#settings', 'button small'))
+      el('div', { className: 'section-heading' }, el('h2', { id: 'folders-title' }, 'フォルダ'),
+        button('＋ 作る', ctx.guard(() => editFolder(ctx, { locations: folderLocations(folders) })), 'button small')),
+      homeFolderList(folders, folderCounts(folders, photos, now)))
   ];
 }
 
@@ -126,61 +151,129 @@ function thumbnails(photos, scope) {
     const image = el('img', { alt: '', 'data-photo-id': photo.id, decoding: 'async' });
     observer.observe(image);
     const title = photo.note.split(/\r?\n/, 1)[0].trim() || photoTitle(photo);
+    const tags = normalizePhotoTags(photo.tags);
+    const marks = TAGS.filter(tag => tags.includes(tag.id));
     return el('li', {}, el('a', { className: 'tile', href: `#photo/${photo.id}` },
-      el('span', { className: 'tile-image' }, image),
-      el('span', { className: 'tile-title', title }, title)));
+      el('span', { className: 'tile-image' }, image,
+        marks.length > 0 && el('span', { className: 'tile-tags' }, marks.map(tagDot))),
+      el('span', { className: 'tile-title', title }, title),
+      marks.length > 0 && el('span', { className: 'visually-hidden' }, marks.map(tag => `${tag.color}の印`).join('、'))));
   });
   return el('ul', { className: 'tiles' }, tiles);
 }
 
+function folderPhotoList(ctx, folder, photos, preferences, now, scope) {
+  const visible = selectPhotos(photos, preferences, now);
+  const { sort, filter } = preferences;
+  const selectedTag = TAGS.find(tag => tag.id === filter);
+  const apply = changes => ctx.guard(async () => {
+    await db.updatePhotoPreferences(changes);
+    if (scope.current()) ctx.refresh();
+  });
+  const sortButton = button('並べかえ', () => actionSheet('並べかえ', PHOTO_SORTS.map(({ id, label }) => ({
+    label, current: id === sort, run: id === sort ? () => {} : apply({ sort: id })
+  }))), 'button small');
+  sortButton.setAttribute('aria-haspopup', 'dialog');
+  const filterButton = (id, tag) => el('button', {
+    type: 'button', className: tag ? 'button tag-filter-button' : 'button small tag-filter-all',
+    'aria-pressed': String(id === filter),
+    ...(tag ? { 'aria-label': `${tag.color}の印でしぼりこむ` } : {}),
+    onclick: id === filter ? undefined : apply({ filter: id })
+  }, tag ? tagDot(tag) : 'すべて');
+  return el('section', { className: 'section' },
+    el('h2', {}, `${folder.name}の写真`),
+    el('div', { className: 'photo-list-controls' },
+      sortButton,
+      el('span', { className: 'muted' }, PHOTO_SORTS.find(option => option.id === sort).label)),
+    el('div', { className: 'photo-filter-controls', role: 'group', 'aria-labelledby': 'photo-filter-label' },
+      el('span', { id: 'photo-filter-label', className: 'muted' }, 'しぼりこみ'),
+      filterButton('all'), TAGS.map(tag => filterButton(tag.id, tag))),
+    selectedTag && el('p', { className: 'photo-filter-status', role: 'status' },
+      el('span', { className: 'visually-hidden' }, `${selectedTag.color}の印でしぼりこみ中`),
+      tagDot(selectedTag), `（${visible.length}枚）`),
+    visible.length ? thumbnails(visible, scope) : el('p', { className: 'empty' },
+      photos.length ? 'この印がついた写真はありません。' : 'このフォルダには、まだ写真がありません。'));
+}
+
 export async function renderFolder(ctx, id, scope) {
-  const [all, folders] = await Promise.all([db.listPhotos(), db.listFolders()]);
+  const [all, folders, preferences] = await Promise.all([db.listPhotos(), db.listFolders(), db.getPhotoPreferences()]);
   const folder = folders.find(record => record.id === id);
-  if (!folder) return [heading('フォルダが見つかりません', 'ホームへ', '#home')];
-  const photos = all.filter(photo => photo.folderId === id).sort((a, b) => a.importedAt - b.importedAt);
+  if (!folder) return [heading('フォルダが見つかりません', 'ほーむへ', '#home')];
+  const parent = folders.find(record => record.id === folder.parentId);
+  const children = folderTree(folders).find(entry => entry.folder.id === id)?.children ?? [];
+  const photos = all.filter(photo => photo.folderId === id);
+  const branch = folderIdsInBranch(folders, id);
   const now = new Date();
-  const dueCount = duePhotos(photos, now).length;
-  scope.refreshAt(nextReviewRefresh(photos, now));
+  const counts = folderCounts(folders, all, now);
+  const { total, due } = counts.get(id);
+  scope.refreshAt(nextReviewRefresh(all.filter(photo => branch.has(photo.folderId)), now));
   const remove = ctx.guard(async () => {
-    const defaultName = folders.find(record => record.id === db.DEFAULT_FOLDER).name;
-    const choice = await dialog('フォルダを消しますか？',
-      el('p', {}, `中の写真を一緒に消すか、「${defaultName}」に移すか選んでください。`), [
-        ['やめる', ''], [`「${defaultName}」に移す`, 'move', 'button primary'],
-        ['写真も一緒に消す', 'delete', 'button danger']
+    const destination = parent?.name ?? folders.find(record => record.id === db.DEFAULT_FOLDER).name;
+    const folderText = children.length ? `このフォルダと中の${children.length}個、合わせて${branch.size}個のフォルダ` :
+      'このフォルダ1個';
+    const choice = await dialog('フォルダを消しますか？', el('div', { className: 'dialog-copy' },
+      el('p', {}, `${folderText}が消えます。`),
+      el('p', {}, `写真${total}枚を一緒に消すか、「${destination}」に移すか選んでください。`)), [
+        ['やめる', ''], [parent ? '1つ上に移す' : `「${destination}」に移す`, 'move', 'button primary'],
+        [`写真${total}枚も消す`, 'delete', 'button danger']
       ]);
     if (!choice) return;
     await db.deleteFolder(id, choice === 'move');
     ctx.notify('フォルダを消しました。');
-    ctx.navigate('#home');
+    ctx.navigate(parent ? `#folder/${parent.id}` : '#home');
   });
-  const start = ctx.guard(async () => {
-    const queue = duePhotos(await db.listPhotos(), new Date(), id);
+  const start = button(due ? `このフォルダを復習（${due}枚）` : '今は復習する写真はありません', ctx.guard(async () => {
+    const [latestPhotos, latestFolders] = await Promise.all([db.listPhotos(), db.listFolders()]);
+    if (!scope.current()) return;
+    const latestBranch = folderIdsInBranch(latestFolders, id);
+    const queue = duePhotos(latestPhotos.filter(photo => latestBranch.has(photo.folderId)), new Date());
     if (queue.length) ctx.startReview(queue, folder);
     else ctx.refresh();
-  });
-  return [
-    heading(folder.name, 'ホームへ', '#home'),
-    el('div', { className: 'folder-summary' },
-      description(`写真 ${photos.length}枚・今の復習 ${dueCount}枚`),
-      el('div', { className: 'actions' },
-        link('ここに取りこむ', `#import/${id}`, 'button primary'),
-        dueCount > 0 && button('このフォルダを復習', start),
-        button('名前を変える', ctx.guard(() => editFolder(ctx, folder))),
-        id !== db.DEFAULT_FOLDER && button('フォルダを消す', remove, 'button danger'))),
-    photos.length ? thumbnails(photos, scope) :
-      el('p', { className: 'empty' }, 'このフォルダには、まだ写真がありません。')
-  ];
-}
+  }), 'button primary folder-review');
+  start.disabled = due === 0;
 
-export function photoSource(photo) {
-  if (!photo.source) return null;
-  return el('p', { className: 'source' },
-    `元のPDF：${photo.source.name} ・ ${photo.source.page}ページ`);
+  const destinations = parent ? folders.filter(record => canHaveChildren(record) && record.id !== parent.id) : [];
+  const actions = {
+    rename: ctx.guard(() => editFolder(ctx, { folder })),
+    create: ctx.guard(() => editFolder(ctx, { parent: folder })),
+    move: ctx.guard(async () => {
+      const select = folderSelect(destinations);
+      if (!await dialog('フォルダを移す', labeled('移す先のフォルダ', select),
+        [['やめる', ''], ['移す', 'move', 'button primary']])) return;
+      await db.moveFolder(id, select.value);
+      ctx.notify('フォルダを移しました。');
+      ctx.refresh();
+    }),
+    remove
+  };
+  const more = button('︙', () => {
+    actionSheet('そのほかの操作', folderMenuItems(folder, destinations.length > 0).map(item => ({
+      ...item, run: actions[item.id]
+    })));
+  }, 'button small more-button');
+  more.setAttribute('aria-label', 'そのほかの操作');
+  more.setAttribute('aria-haspopup', 'dialog');
+  const separator = () => el('span', { 'aria-hidden': 'true' }, '›');
+  const breadcrumb = el('nav', { className: 'breadcrumb', 'aria-label': '今いる場所' },
+    link('ほーむ', '#home', 'breadcrumb-link'), separator(),
+    parent && [link(parent.name, `#folder/${parent.id}`, 'breadcrumb-link'), separator()],
+    el('span', { 'aria-current': 'page' }, folder.name));
+
+  return [
+    el('header', { className: 'page-heading' }, breadcrumb,
+      el('div', { className: 'folder-heading' }, el('h1', {}, folder.name),
+        el('span', { className: 'muted folder-total' }, `写真 ${total}枚`))),
+    el('div', { className: 'folder-operations' }, start,
+      el('div', { className: 'folder-controls' }, folderImport(ctx, id), more)),
+    children.length > 0 && el('section', { className: 'section' },
+      el('h2', {}, '中のフォルダ'), childFolderList(children, counts)),
+    folderPhotoList(ctx, folder, photos, preferences, now, scope)
+  ];
 }
 
 export async function renderPhoto(ctx, id, scope) {
   const [photo, image, folders] = await Promise.all([db.getPhoto(id), db.getImage(id), db.listFolders()]);
-  if (!photo || !image?.full) return [heading('写真が見つかりません', 'ホームへ', '#home')];
+  if (!photo || !image?.full) return [heading('写真が見つかりません', 'ほーむへ', '#home')];
   const back = `#folder/${photo.folderId}`;
   const due = el('p', { className: 'due-info' });
   const memory = el('p', { className: 'muted' });
@@ -202,7 +295,7 @@ export async function renderPhoto(ctx, id, scope) {
   };
   showDue(photo.excluded);
   const noteStatus = el('span', { className: 'muted', role: 'status' }, '書いた内容は自動で保存します。');
-  const note = el('textarea', { value: photo.note, rows: 4, placeholder: '覚えたいことを書く' });
+  const note = el('textarea', { value: photo.note, rows: 2, placeholder: '覚えたいことを書く' });
   let noteVersion = 0;
   note.oninput = async () => {
     const version = ++noteVersion;
@@ -223,13 +316,13 @@ export async function renderPhoto(ctx, id, scope) {
       showDue(checked);
     } catch {
       toggle.checked = !checked;
-      ctx.notify('復習の設定を保存できませんでした。');
+      ctx.notify('復習するかどうかを保存できませんでした。');
     } finally {
       toggle.disabled = false;
     }
   };
   const move = ctx.guard(async () => {
-    const select = folderSelect(sortedFolders(folders), photo.folderId);
+    const select = folderSelect(folders, photo.folderId);
     if (!await dialog('写真を移す', labeled('移す先のフォルダ', select),
       [['やめる', ''], ['移す', 'move', 'button primary']]) || select.value === photo.folderId) return;
     await db.updatePhoto(id, { folderId: select.value });
@@ -244,11 +337,24 @@ export async function renderPhoto(ctx, id, scope) {
     ctx.notify('写真を消しました。');
     ctx.navigate(back);
   });
+  const url = scope.blobUrl(image.full);
+  const openPreview = () => {
+    if (!scope.current()) return;
+    ctx.openPhotoViewer({
+      photoId: id, url, alt: '勉強用の写真',
+      async loadPhotoIds() {
+        const [photos, preferences] = await Promise.all([db.listPhotos(), db.getPhotoPreferences()]);
+        const current = photos.find(item => item.id === id) ?? photo;
+        return viewerPhotoIds(photos, current, preferences, new Date());
+      }
+    });
+  };
   return [
     heading(photoTitle(photo), 'フォルダへ', back),
     photoSource(photo),
-    photoZoom(scope.blobUrl(image.full), '勉強用の写真'),
-    el('section', { className: 'panel' }, labeled('メモ', note), noteStatus),
+    photoPreview(url, openPreview),
+    photoTagButtons(photo.tags, ctx.guard(tag => db.toggleStoredPhotoTag(id, tag))),
+    el('section', { className: 'panel photo-note' }, labeled('メモ', note), noteStatus),
     el('section', { className: 'panel' }, due, memory,
       el('label', { className: 'toggle' }, toggle, '復習しない'),
       el('div', { className: 'actions' },

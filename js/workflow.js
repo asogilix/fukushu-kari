@@ -1,36 +1,65 @@
 import * as db from './db.js';
 import { makeBackup, openBackup } from './backup.js';
+import { folderIdsInBranch } from './folders.js';
 import { readPdf, shrinkPhoto } from './import.js';
-import { backupAge, photoSource, sortedFolders } from './library.js';
-import { localDay, MAX_RETENTION, MIN_RETENTION, newReview, RETENTION_SETTING, reviewIsDue, reviewRetention } from './review.js';
-import { button, description, dialog, el, folderSelect, heading, labeled, link, photoZoom } from './ui.js';
+import { normalizePhotoTags, togglePhotoTag } from './photo-options.js';
+import {
+  daysBetween, duePhotos, localDay, MAX_RETENTION, MIN_RETENTION, newReview, RETENTION_SETTING, reviewIsDue,
+  reviewRetention
+} from './review.js';
+import {
+  actionSheet, button, description, dialog, el, formatDateTime, heading, labeled, link,
+  photoPreview, photoSource, photoTagButtons
+} from './ui.js';
 
 let session;
 
 export function beginReview(photos, folder) {
-  session = { queue: photos.map(photo => photo.id), folder, answered: 0 };
+  session = { queue: photos.map(photo => photo.id), folder, answered: 0, forgotten: new Map() };
+  return session;
+}
+
+export function endReview() {
+  session = undefined;
 }
 
 export async function renderReview(ctx, scope) {
+  if (!session) {
+    const photos = await db.listPhotos();
+    if (!scope.current()) return [];
+    if (!session) beginReview(duePhotos(photos, new Date()));
+  }
   const active = session;
+  const folderId = active.folder?.id;
+  const branch = folderId ? folderIdsInBranch(await db.listFolders(), folderId) : null;
   let photo;
   let image;
-  while (active?.queue.length && scope.current()) {
+  while (active.queue.length && scope.current()) {
     const id = active.queue[0];
     [photo, image] = await Promise.all([db.getPhoto(id), db.getImage(id)]);
     if (!scope.current()) return [];
-    if (photo && image?.full && reviewIsDue(photo, Date.now(), active.folder?.id)) break;
+    if (photo && image?.full && (!branch || branch.has(photo.folderId)) && reviewIsDue(photo, Date.now())) break;
     active.queue.shift();
     photo = undefined;
   }
-  const title = heading('今の復習', 'ホームへ', '#home');
-  if (!photo) return [
-    title,
-    el('section', { className: 'panel completion' },
-      el('h2', {}, active?.answered ? '今回の復習が終わりました' : '復習する写真はありません'),
-      active?.answered ? description(`${active.answered}枚を復習しました。`) : null,
-      link('ホームに戻る', '#home', 'button primary'))
-  ];
+  const title = heading('今の復習', 'ほーむへ', '#home');
+  if (!photo) {
+    let forgotten = 0;
+    if (active.forgotten.size) {
+      const latest = await Promise.all([...active.forgotten.keys()].map(db.getPhoto));
+      if (!scope.current()) return [];
+      forgotten = latest.filter(item =>
+        item && !item.excluded && item.card.last_review === active.forgotten.get(item.id)).length;
+    }
+    return [
+      title,
+      el('section', { className: active.answered ? 'panel completion' : 'panel completion empty' },
+        el('h2', {}, active.answered ? '今回の復習が終わりました' : '復習する写真はありません'),
+        active.answered > 0 && description(`${active.answered}枚を復習しました。`),
+        forgotten > 0 && description(`忘れた${forgotten}枚は、10分後にもう一度出ます`),
+        link('ほーむに戻る', '#home', 'button primary'))
+    ];
+  }
 
   const note = el('p', { className: 'review-note', id: 'review-note', hidden: true },
     photo.note || 'メモはありません。');
@@ -49,9 +78,13 @@ export async function renderReview(ctx, scope) {
       if (value === 'later') {
         active.queue.push(active.queue.shift());
       } else {
-        const saved = await db.recordReview(photo, value, new Date(), active.folder?.id);
+        const reviewedAt = new Date();
+        const saved = await db.recordReview(photo, value, reviewedAt, folderId);
         active.queue.shift();
-        if (saved) active.answered++;
+        if (saved) {
+          active.answered++;
+          if (value === 'forgot') active.forgotten.set(photo.id, reviewedAt.toISOString());
+        }
       }
       if (scope.current()) ctx.refresh();
     } catch {
@@ -63,85 +96,148 @@ export async function renderReview(ctx, scope) {
     button('忘れてた', answer('forgot'), 'button forgot'),
     button('覚えてた', answer('remembered'), 'button primary'),
     button('あとで', answer('later'), 'button later'));
+  const url = scope.blobUrl(image.full);
+  const openPreview = () => {
+    if (scope.current()) ctx.openPhotoViewer({ photoId: photo.id, url, alt: '復習する写真' });
+  };
   return [
     title,
     el('div', { className: 'review-meta' },
       description(active.folder?.name ?? 'すべてのフォルダ'),
       el('span', { className: 'pill due' }, `残り ${active.queue.length}枚`)),
     photoSource(photo),
-    photoZoom(scope.blobUrl(image.full), '復習する写真'),
-    el('section', { className: 'review-memory' }, reveal, note),
+    photoPreview(url, openPreview),
+    el('section', { className: 'review-memory' },
+      photoTagButtons(photo.tags, ctx.guard(tag => db.toggleStoredPhotoTag(photo.id, tag))), reveal, note),
     controls
   ];
 }
 
-function filePicker(text, options, onSelect, className = 'button') {
+function fileInput(options, onSelect) {
   const input = el('input', { type: 'file', hidden: true, ...options });
   input.onchange = () => {
     const files = Array.from(input.files);
     input.value = '';
     if (files.length) onSelect(files);
   };
-  return [button(text, () => input.click(), className), input];
+  return input;
 }
 
-function saveImported(image, folderId, source, fileModifiedAt) {
+async function saveImported(image, folderId, source, fileModifiedAt) {
+  const id = crypto.randomUUID();
   const importedAt = Date.now();
   const hasFileTime = Number.isSafeInteger(fileModifiedAt) && Number.isFinite(+new Date(fileModifiedAt));
-  return db.savePhoto({
-    id: crypto.randomUUID(), folderId, source, importedAt,
+  await db.savePhoto({
+    id, folderId, source, importedAt,
     ...(hasFileTime ? { fileModifiedAt } : {}),
     note: '', excluded: false, card: newReview(importedAt)
   }, image);
+  return id;
 }
 
-export async function renderImport(ctx, id) {
-  const folders = sortedFolders(await db.listFolders());
-  const destination = folderSelect(folders, id || ctx.importFolder);
-  const openFolder = link('取りこみ先のフォルダを開く', `#folder/${destination.value}`, 'back-link');
-  destination.onchange = () => {
-    ctx.importFolder = destination.value;
-    openFolder.href = `#folder/${destination.value}`;
+async function importedNote(photo, preview, index, total) {
+  const note = el('textarea', { rows: 3, value: photo.note, placeholder: '覚えたいことを書く' });
+  let tags = normalizePhotoTags(photo.tags);
+  const marks = photoTagButtons(tags, (id, current) => {
+    tags = togglePhotoTag(current, id);
+    return tags;
+  });
+  const url = URL.createObjectURL(preview);
+  const status = el('p', { className: 'import-note-error', role: 'status', hidden: true });
+  const title = el('h2', { id: 'import-note-title', tabIndex: -1, autofocus: true }, '取りこんだ写真にメモ');
+  const fields = el('fieldset', { className: 'import-note-fields' });
+  const sheet = el('dialog', { className: 'action-sheet import-note-sheet', 'aria-labelledby': title.id });
+  fields.append(
+    el('img', { className: 'import-note-preview', src: url, alt: '取りこんだ写真' }),
+    labeled('メモ', note), marks, status,
+    el('div', { className: 'dialog-actions' },
+      index + 1 < total && button('残りはあとで', () => sheet.close('')),
+      button('あとで', () => sheet.close('next')),
+      el('button', { className: 'button primary', type: 'submit' }, '保存')));
+  const form = el('form', {}, title, total > 1 && description(`${index + 1}枚目／${total}枚`), fields);
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (fields.disabled) return;
+    fields.disabled = true;
+    status.hidden = true;
+    try {
+      await db.updatePhoto(photo.id, { note: note.value, tags });
+      if (sheet.open) sheet.close('next');
+    } catch {
+      status.textContent = 'メモと印を保存できませんでした。もう一度お試しください。';
+      status.hidden = false;
+    } finally {
+      fields.disabled = false;
+    }
   };
+  sheet.oncancel = event => {
+    if (fields.disabled) event.preventDefault();
+  };
+  sheet.append(form);
+  document.body.append(sheet);
+  try {
+    const closed = new Promise(resolve => sheet.addEventListener('close', () => resolve(sheet.returnValue), { once: true }));
+    sheet.showModal();
+    return await closed;
+  } finally {
+    sheet.remove();
+    URL.revokeObjectURL(url);
+  }
+}
+
+function runImport(ctx, message, work) {
+  return ctx.runJob(message, async (progress, hideProgress) => {
+    const preferences = await db.getPhotoPreferences();
+    const ids = [];
+    const report = await work(progress, ids);
+    hideProgress();
+    if (preferences.importNote) {
+      for (const [index, id] of ids.entries()) {
+        const [photo, image] = await Promise.all([db.getPhoto(id), db.getImage(id)]);
+        if (photo && image?.full && !await importedNote(photo, image.thumb ?? image.full, index, ids.length)) break;
+      }
+    }
+    ctx.notify(report);
+    ctx.refreshLibrary();
+  });
+}
+
+export function folderImport(ctx, folderId) {
   const photos = files => {
-    const folderId = destination.value;
-    ctx.runJob('写真を取りこんでいます。', async progress => {
-      let imported = 0;
+    runImport(ctx, '写真を取りこんでいます。', async (progress, ids) => {
       for (const [index, file] of files.entries()) {
         progress(index, files.length, `写真を取りこんでいます（${index}／${files.length}枚）`);
         try {
           const image = await shrinkPhoto(file);
-          await saveImported(image, folderId, null, file.lastModified);
-          imported++;
+          ids.push(await saveImported(image, folderId, null, file.lastModified));
         } catch (error) {
           if (error.name === 'QuotaExceededError') break;
         }
       }
-      const skipped = files.length - imported;
-      ctx.notify(skipped ? `${imported}枚を取りこみました。${skipped}枚は読みこみか保存ができませんでした。` :
-        `${imported}枚を取りこみました。`);
-      ctx.refreshLibrary();
+      const skipped = files.length - ids.length;
+      const report = `${ids.length}枚を取りこみました。`;
+      return skipped ? `${report}${skipped}枚は読みこみか保存ができませんでした。` : report;
     });
   };
-  const camera = filePicker('カメラで撮る',
-    { accept: 'image/*' }, photos, 'button primary');
+  const camera = fileInput({ accept: 'image/*' }, photos);
   // capture is currently an attribute, even on browsers without a corresponding property.
-  camera[1].setAttribute('capture', 'environment');
-  const gallery = filePicker('スマホの写真を選ぶ', { accept: 'image/*', multiple: true }, photos);
-  const range = el('input', { type: 'text', placeholder: '例　3-10', maxLength: 32, autocomplete: 'off' });
-  const pdf = filePicker('PDF を選ぶ', { accept: 'application/pdf,.pdf' }, ([file]) => {
-    const folderId = destination.value;
-    const requested = range.value;
-    ctx.runJob('PDF を開いています。', async progress => {
-      let imported = 0;
+  camera.setAttribute('capture', 'environment');
+  const gallery = fileInput({ accept: 'image/*', multiple: true }, photos);
+  const pdf = fileInput({ accept: 'application/pdf,.pdf' }, ctx.guard(async ([file]) => {
+    const range = el('input', { type: 'text', placeholder: '例　3-10', maxLength: 32, autocomplete: 'off' });
+    const choice = await dialog('PDF の取りこみ', [
+      labeled('ページの範囲', range),
+      description('空のままなら、すべてのページを取りこみます。')
+    ], [['やめる', ''], ['取りこむ', 'import', 'button primary']]);
+    if (!choice) return;
+    runImport(ctx, 'PDF を開いています。', async (progress, ids) => {
       try {
-        await readPdf(file, requested, async (image, source) => {
-          await saveImported(image, folderId, source);
-          imported++;
+        await readPdf(file, range.value, async (image, source) => {
+          ids.push(await saveImported(image, folderId, source));
         }, (completed, total) => {
           progress(completed, total, `PDF を取りこんでいます（${completed}／${total}ページ）`);
         });
-        ctx.notify(`${imported}ページを取りこみました。`);
+        return `${ids.length}枚を取りこみました。`;
       } catch (error) {
         let reason = 'PDF を読みこめませんでした。';
         if (error.message?.startsWith('ページ') || error.message?.startsWith('PDF を読むため')) {
@@ -151,21 +247,17 @@ export async function renderImport(ctx, id) {
         } else if (error.name === 'QuotaExceededError') {
           reason = '空き容量が足りません。';
         }
-        ctx.notify(imported ? `${imported}ページを取りこみました。${reason}` : reason);
+        return ids.length ? `${ids.length}枚を取りこみました。${reason}` : reason;
       }
-      ctx.refreshLibrary();
     });
-  });
-  return [
-    heading('取りこみ', 'ホームへ', '#home'),
-    el('section', { className: 'panel' }, labeled('取りこみ先のフォルダ', destination), openFolder),
-    el('section', { className: 'panel' }, el('h2', {}, '写真を取りこむ'),
-      el('div', { className: 'actions' }, camera, gallery)),
-    el('section', { className: 'panel' }, el('h2', {}, 'PDF を取りこむ'),
-      labeled('ページの範囲', range),
-      description('空のままなら、すべてのページを取りこみます。'),
-      pdf)
-  ];
+  }));
+  const open = button('ここに取りこむ', () => actionSheet('ここに取りこむ', [
+    { label: 'カメラで撮る', run: () => camera.click() },
+    { label: 'スマホの写真を選ぶ', run: () => gallery.click() },
+    { label: 'PDF を選ぶ', run: () => pdf.click() }
+  ]), 'button small');
+  open.setAttribute('aria-haspopup', 'dialog');
+  return [open, camera, gallery, pdf];
 }
 
 function storageAmount(bytes) {
@@ -173,8 +265,27 @@ function storageAmount(bytes) {
   return `${(bytes / 1024 ** 2).toFixed(1)}メガバイト`;
 }
 
+function backupDate(day) {
+  return day ? formatDateTime(`${day}T00:00:00`, { withTime: false, withYear: true }) : 'まだありません';
+}
+
 export async function renderSettings(ctx, scope) {
-  const [last, retention] = await Promise.all([db.getSetting('lastBackup'), db.getSetting(RETENTION_SETTING)]);
+  const [last, retention, preferences] = await Promise.all([
+    db.getSetting('lastBackup'), db.getSetting(RETENTION_SETTING), db.getPhotoPreferences()
+  ]);
+  const importNote = el('input', { type: 'checkbox', checked: preferences.importNote });
+  importNote.onchange = ctx.guard(async () => {
+    const checked = importNote.checked;
+    importNote.disabled = true;
+    try {
+      await db.updatePhotoPreferences({ importNote: checked });
+    } catch (error) {
+      importNote.checked = !checked;
+      throw error;
+    } finally {
+      importNote.disabled = false;
+    }
+  });
   let savedGoal = String(Math.round(reviewRetention(retention) * 100));
   const goal = el('select');
   for (let percent = Math.round(MIN_RETENTION * 100); percent <= Math.round(MAX_RETENTION * 100); percent++) {
@@ -193,7 +304,9 @@ export async function renderSettings(ctx, scope) {
       goal.disabled = false;
     }
   });
-  const age = el('p', { className: 'muted' }, backupAge(last).text);
+  const age = description(`最後のバックアップ：${backupDate(last)}`);
+  const reminder = description('最後のバックアップから14日以上たっています。');
+  reminder.hidden = !last || daysBetween(last, localDay()) < 14;
   const download = el('div', { className: 'download', hidden: true });
   let downloadUrl;
   let saving = false;
@@ -207,10 +320,10 @@ export async function renderSettings(ctx, scope) {
   }
   scope.onLeave(clearDownload);
   const usage = el('p', { className: 'muted' }, '使っている容量を調べています。');
-  const protection = el('p', { className: 'muted' }, '保存の設定を調べています。');
+  const protection = el('p', { className: 'muted' }, '保存のせっていを調べています。');
   const persist = button('写真を消えにくくする', ctx.guard(async () => {
     const granted = await navigator.storage?.persist?.();
-    ctx.notify(granted ? '写真を消えにくくする設定が有効になりました。' : 'ブラウザから許可が得られませんでした。');
+    ctx.notify(granted ? '写真を消えにくくするせっていが有効になりました。' : 'ブラウザから許可が得られませんでした。');
     await updateStorage();
   }));
   async function updateStorage() {
@@ -220,7 +333,7 @@ export async function renderSettings(ctx, scope) {
     usage.textContent = Number.isFinite(estimate.value?.usage) ?
       `使っている容量の目安：${storageAmount(estimate.value.usage)}` : '使っている容量はわかりません。';
     protection.textContent = persistent.value ?
-      '写真を消えにくくする設定が有効です。' : '写真を消えにくくする設定は有効になっていません。';
+      '写真を消えにくくするせっていが有効です。' : '写真を消えにくくするせっていは有効になっていません。';
     persist.disabled = Boolean(persistent.value);
     persist.hidden = !navigator.storage?.persist;
   }
@@ -229,7 +342,7 @@ export async function renderSettings(ctx, scope) {
     const blob = await makeBackup(await db.backupSnapshot(), (done, total) =>
       progress(done, total, `バックアップを作っています（${done}／${total}件）`));
     if (!scope.current()) {
-      ctx.notify('バックアップを保存するには、設定で作り直してください。');
+      ctx.notify('バックアップを保存するには、せっていで作り直してください。');
       return;
     }
     clearDownload();
@@ -240,7 +353,8 @@ export async function renderSettings(ctx, scope) {
       saving = true;
       const today = localDay();
       db.setSetting('lastBackup', today).then(() => {
-        age.textContent = backupAge(today).text;
+        age.textContent = `最後のバックアップ：${backupDate(today)}`;
+        reminder.hidden = true;
         ctx.notify('バックアップの保存を始めました。');
       }).catch(() => ctx.notify('最後に保存した日を記録できませんでした。'));
     };
@@ -248,9 +362,9 @@ export async function renderSettings(ctx, scope) {
     download.hidden = false;
     save.focus();
   }), 'button primary');
-  const restore = filePicker('バックアップを読みこむ', { accept: '.zip,application/zip' }, ctx.guard(async ([file]) => {
+  const restore = fileInput({ accept: '.zip,application/zip' }, ctx.guard(async ([file]) => {
     const approved = await dialog('バックアップを読みこみますか？',
-      el('p', {}, '今の写真帳に追加します。同じ写真やフォルダがある場合は、ファイルの内容で上書きします。'),
+      el('p', {}, '今の写真帳に追加します。同じ写真やフォルダがある場合は、ファイルの内容で上書きします。一覧と取りこみのせっていも読みこみます。'),
       [['やめる', ''], ['読みこむ', 'restore', 'button primary']]);
     if (!approved) return;
     ctx.runJob('バックアップを調べています。', async progress => {
@@ -260,8 +374,8 @@ export async function renderSettings(ctx, scope) {
         progress(null, null, '写真帳に保存しています。');
         await db.restoreSnapshot(snapshot);
         ctx.notify(`バックアップから${snapshot.photos.length}枚の写真を読みこみました。`);
-        await updateStorage();
-        ctx.refreshLibrary();
+        if (scope.current()) ctx.refresh();
+        else ctx.refreshLibrary();
       } catch (error) {
         ctx.notify(error.name === 'QuotaExceededError' ? '空き容量が足りません。' :
           'バックアップを読みこめませんでした。この写真帳で作ったファイルか確かめてください。');
@@ -270,11 +384,12 @@ export async function renderSettings(ctx, scope) {
   }));
 
   const installState = el('div');
+  const installSection = el('section', { className: 'panel' }, el('h2', {}, 'ホーム画面に追加'), installState);
   function showInstall() {
+    installSection.hidden = ctx.installed;
+    if (ctx.installed) return;
     const prompt = ctx.installPrompt;
-    if (ctx.installed) {
-      installState.replaceChildren(description('ホーム画面から写真帳を開けます。'));
-    } else if (prompt) {
+    if (prompt) {
       installState.replaceChildren(button('ホーム画面に追加', ctx.guard(async () => {
         ctx.installPrompt = null;
         await prompt.prompt();
@@ -283,7 +398,7 @@ export async function renderSettings(ctx, scope) {
         showInstall();
       }), 'button primary'));
     } else {
-      installState.replaceChildren(description('ブラウザの右上のメニューから「ホーム画面に追加」を選びます。'));
+      installState.replaceChildren(description('ブラウザの右上のメニューから、スマホのホーム画面に追加します。'));
     }
   }
   showInstall();
@@ -291,13 +406,16 @@ export async function renderSettings(ctx, scope) {
   scope.listen(window, 'appinstalled', showInstall);
 
   return [
-    heading('設定', 'ホームへ', '#home'),
+    heading('せってい', 'ほーむへ', '#home'),
+    el('section', { className: 'panel' }, el('h2', {}, '取りこみ'),
+      el('label', { className: 'toggle' }, importNote, '取りこんだ直後にメモ欄を出す')),
     el('section', { className: 'panel' }, el('h2', {}, '復習'), labeled('覚えている確率の目標', goal),
       description('高くすると、次の復習までの間隔が短くなります。次に答えたときから反映します。')),
-    el('section', { className: 'panel' }, el('h2', {}, 'バックアップ'), age,
-      description('写真、メモ、フォルダ、復習の予定と記録をひとつのファイルにまとめます。'),
-      el('div', { className: 'actions' }, exportBackup, restore), download),
+    el('section', { className: 'panel' }, el('h2', {}, 'バックアップ'), age, reminder,
+      description('写真、メモ、印、フォルダ、復習の予定と記録、一覧と取りこみのせっていをひとつのファイルにまとめます。'),
+      el('div', { className: 'actions' }, exportBackup,
+        button('バックアップを読みこむ', () => restore.click()), restore), download),
     el('section', { className: 'panel' }, el('h2', {}, 'スマホの保存容量'), usage, protection, persist),
-    el('section', { className: 'panel' }, el('h2', {}, 'ホーム画面に追加'), installState)
+    installSection
   ];
 }

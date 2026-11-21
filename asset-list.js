@@ -8,8 +8,12 @@ self.APP_ASSETS = [
   "js/backup.js",
   "js/config.js",
   "js/db.js",
+  "js/folders.js",
   "js/import.js",
   "js/library.js",
+  "js/photo-options.js",
+  "js/photo-viewer-logic.js",
+  "js/photo-viewer.js",
   "js/review.js",
   "js/ui.js",
   "js/workflow.js",
@@ -221,6 +225,10 @@ self.APP_ASSETS = [
   "vendor/pdfjs/wasm/quickjs-eval.js",
   "vendor/pdfjs/wasm/quickjs-eval.wasm",
   "vendor/ts-fsrs/LICENSE",
-  "vendor/ts-fsrs/index.mjs"
+  "vendor/ts-fsrs/index.mjs",
+  "vendor/zen-maru-gothic/OFL.txt",
+  "vendor/zen-maru-gothic/ZenMaruGothic-Black.woff2",
+  "vendor/zen-maru-gothic/ZenMaruGothic-Bold.woff2",
+  "vendor/zen-maru-gothic/ZenMaruGothic-Medium.woff2"
 ];
-self.APP_CACHE_VERSION = 'c9e109e64af7f03b';
+self.APP_CACHE_VERSION = 'c8584d40b9ac0a49';

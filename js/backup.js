@@ -1,5 +1,6 @@
 import { Rating, S_MIN, State } from '../vendor/ts-fsrs/index.mjs';
-import { DEFAULT_FOLDER } from './db.js';
+import { DEFAULT_FOLDER, normalizeFolders } from './folders.js';
+import { normalizePhotoPreferences, normalizePhotoTags } from './photo-options.js';
 import { isCalendarDay, migrateLegacyPhoto } from './review.js';
 import { readZip, writeZip } from './zip.js';
 
@@ -11,8 +12,14 @@ const validIsoTime = value => typeof value === 'string' && Number.isFinite(Date.
 const imagePath = id => `photos/${id}.jpg`;
 const thumbPath = id => `thumbnails/${id}.jpg`;
 
-export async function makeBackup({ folders, photos, images, reviewLogs = [] }, onProgress) {
-  const metadata = new Blob([JSON.stringify({ version: 2, folders, photos, reviewLogs })]);
+export async function makeBackup({ folders, photos, images, reviewLogs = [], photoPreferences }, onProgress) {
+  const metadata = new Blob([JSON.stringify({
+    version: 2,
+    folders: folders.map(folder => ({ ...folder, parentId: folder.parentId ?? null })),
+    photos: photos.map(photo => ({ ...photo, tags: normalizePhotoTags(photo.tags) })),
+    reviewLogs,
+    photoPreferences: normalizePhotoPreferences(photoPreferences)
+  })]);
   if (metadata.size > MAX_METADATA_BYTES) throw new Error('バックアップの記録が多すぎます。');
   const entries = [['data.json', metadata]];
   for (const photo of photos) {
@@ -57,7 +64,7 @@ export async function openBackup(file, onProgress, now = new Date()) {
     requireBackup(folder && validId(folder.id) && !folderIds.has(folder.id) &&
       typeof folder.name === 'string' && folder.name.trim() && nonnegativeInteger(folder.createdAt));
     folderIds.add(folder.id);
-    return { id: folder.id, name: folder.name, createdAt: folder.createdAt };
+    return { id: folder.id, name: folder.name, createdAt: folder.createdAt, parentId: folder.parentId };
   });
   requireBackup(folderIds.has(DEFAULT_FOLDER));
 
@@ -82,7 +89,10 @@ export async function openBackup(file, onProgress, now = new Date()) {
       id, full: original.slice(0, original.size, 'image/jpeg'),
       thumb: preview?.slice(0, preview.size, 'image/jpeg')
     });
-    const record = { id, folderId, importedAt, excluded, note, source: source && { name: source.name, page: source.page } };
+    const record = {
+      id, folderId, importedAt, excluded, note, source: source && { name: source.name, page: source.page },
+      tags: normalizePhotoTags(photo.tags)
+    };
     if (legacy) return { ...record, card: migrateLegacyPhoto(photo, now).card };
     return { ...record, card, ...(fileModifiedAt === undefined ? {} : { fileModifiedAt }) };
   });
@@ -94,5 +104,9 @@ export async function openBackup(file, onProgress, now = new Date()) {
     logIds.add(log.id);
     return log;
   });
-  return { folders, photos, images, reviewLogs };
+  const snapshot = { folders: normalizeFolders(folders), photos, images, reviewLogs };
+  if (data.photoPreferences && typeof data.photoPreferences === 'object' && !Array.isArray(data.photoPreferences)) {
+    snapshot.photoPreferences = normalizePhotoPreferences(data.photoPreferences);
+  }
+  return snapshot;
 }

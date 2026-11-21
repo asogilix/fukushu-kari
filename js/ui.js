@@ -1,3 +1,6 @@
+import { folderTree } from './folders.js';
+import { normalizePhotoTags, TAGS } from './photo-options.js';
+
 export function el(tag, props = {}, ...children) {
   const node = document.createElement(tag);
   for (const [name, value] of Object.entries(props)) {
@@ -20,11 +23,15 @@ export function labeled(text, input) {
   return el('label', { className: 'field' }, el('span', {}, text), input);
 }
 
-export function folderSelect(folders, selected, all = false) {
+export function folderSelect(folders, selected) {
   const select = el('select');
-  if (all) select.add(el('option', { value: '' }, 'すべてのフォルダ'));
-  for (const { id, name } of folders) select.add(el('option', { value: id }, name));
-  select.value = selected;
+  for (const { folder, children } of folderTree(folders)) {
+    select.add(el('option', { value: folder.id }, folder.name));
+    for (const child of children) {
+      select.add(el('option', { value: child.id }, `${folder.name} › ${child.name}`));
+    }
+  }
+  if (selected !== undefined) select.value = selected;
   if (select.selectedIndex === -1) select.selectedIndex = 0;
   return select;
 }
@@ -45,13 +52,15 @@ export function formatDateTime(value, { withTime = true, withYear = false } = {}
   return `${year}${date.getMonth() + 1}月${date.getDate()}日${time}`;
 }
 
-export function dialog(title, body, choices) {
+export function dialog(title, body, choices, className = '') {
   const element = document.querySelector('#dialog');
   if (element.open) return Promise.resolve('');
+  element.className = className;
   const form = el('form', { method: 'dialog' },
     el('h2', { id: 'dialog-title' }, title), body,
     el('div', { className: 'dialog-actions' }, choices.map(([text, value, style]) =>
-      el('button', { type: 'submit', value, className: style ?? 'button', formNoValidate: !value }, text))));
+      value ? el('button', { type: 'submit', value, className: style ?? 'button' }, text) :
+        button(text, () => element.close(''), style))));
   element.replaceChildren(form);
   element.returnValue = '';
   return new Promise(resolve => {
@@ -60,72 +69,65 @@ export function dialog(title, body, choices) {
   });
 }
 
-export function photoZoom(url, alt) {
-  const image = el('img', { src: url, alt, draggable: false });
-  const frame = el('div', { className: 'photo-frame' }, image);
-  const pointers = new Map();
-  let scale = 1;
-  let x = 0;
-  let y = 0;
-  const minus = button('縮小', () => zoom(scale / 1.5), 'button small');
-  const plus = button('拡大', () => zoom(scale * 1.5), 'button small');
-
-  function update() {
-    const w = frame.clientWidth;
-    const h = frame.clientHeight;
-    const fit = image.naturalWidth
-      ? Math.min(w / image.naturalWidth, h / image.naturalHeight) : 0;
-    const limitX = Math.max(0, (fit * image.naturalWidth * scale - w) / 2);
-    const limitY = Math.max(0, (fit * image.naturalHeight * scale - h) / 2);
-    x = Math.max(-limitX, Math.min(limitX, x));
-    y = Math.max(-limitY, Math.min(limitY, y));
-    image.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
-    frame.classList.toggle('zoomed', scale > 1);
-    minus.disabled = scale <= 1;
-    plus.disabled = scale >= 5;
-  }
-
-  function zoom(next, centerX = 0, centerY = 0) {
-    const clamped = Math.max(1, Math.min(5, next));
-    const change = clamped / scale;
-    x = centerX + (x - centerX) * change;
-    y = centerY + (y - centerY) * change;
-    scale = clamped;
-    update();
-  }
-
-  const point = event => ({ x: event.clientX, y: event.clientY });
-  const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
-  frame.addEventListener('pointerdown', event => {
-    if (event.button !== 0 || pointers.size >= 2) return;
-    pointers.set(event.pointerId, point(event));
-    frame.setPointerCapture(event.pointerId);
-  });
-  frame.addEventListener('pointermove', event => {
-    const before = pointers.get(event.pointerId);
-    if (!before) return;
-    const after = point(event);
-    pointers.set(event.pointerId, after);
-    const other = [...pointers].find(([id]) => id !== event.pointerId)?.[1];
-    if (!other) {
-      if (scale > 1) {
-        x += after.x - before.x;
-        y += after.y - before.y;
-        update();
+export function actionSheet(title, actions) {
+  const sheet = document.querySelector('#action-sheet');
+  if (sheet.open) return;
+  const close = () => sheet.close();
+  const items = actions.map(({ label, run, disabled = false, danger, current }) =>
+    el('button', {
+      type: 'button', className: danger ? 'sheet-action danger' : 'sheet-action', disabled,
+      ...(current ? { 'aria-current': 'true' } : {}),
+      onclick() {
+        close();
+        run();
       }
-      return;
-    }
-    const rect = frame.getBoundingClientRect();
-    x += (after.x - before.x) / 2;
-    y += (after.y - before.y) / 2;
-    zoom(scale * distance(after, other) / Math.max(1, distance(before, other)),
-      (after.x + other.x - rect.width) / 2 - rect.left,
-      (after.y + other.y - rect.height) / 2 - rect.top);
+    }, label, current && el('span', { 'aria-hidden': 'true' }, ' ✓')));
+  sheet.replaceChildren(el('h2', { id: 'sheet-title' }, title), ...items,
+    button('閉じる', close, 'button sheet-close'));
+  sheet.showModal();
+}
+
+export function tagDot({ id }) {
+  return el('span', { className: `tag-dot tag-${id}`, 'aria-hidden': 'true' });
+}
+
+export function photoTagButtons(initialTags, change) {
+  let tags = normalizePhotoTags(initialTags);
+  let pending = Promise.resolve();
+  const group = el('div', { className: 'tag-buttons', role: 'group', 'aria-label': '写真の印' });
+  const controls = TAGS.map(tag => {
+    const control = button('', () => {
+      pending = pending.then(async () => {
+        const changed = await change(tag.id, tags);
+        if (changed) {
+          tags = changed;
+          update();
+        }
+      });
+    }, 'button tag-button');
+    control.setAttribute('aria-label', `${tag.color}の印`);
+    control.append(tagDot(tag));
+    return control;
   });
-  for (const event of ['pointerup', 'pointercancel', 'lostpointercapture']) {
-    frame.addEventListener(event, pointer => pointers.delete(pointer.pointerId));
+  function update() {
+    controls.forEach((control, index) => control.setAttribute('aria-pressed', String(tags.includes(TAGS[index].id))));
   }
-  image.addEventListener('load', update);
   update();
-  return el('div', { className: 'viewer' }, frame, el('div', { className: 'zoom-actions' }, minus, plus));
+  group.append(...controls);
+  return group;
+}
+
+export function photoSource(photo) {
+  if (!photo.source) return null;
+  return el('p', { className: 'source' },
+    `元のPDF：${photo.source.name} ・ ${photo.source.page}ページ`);
+}
+
+export function photoPreview(url, openViewer) {
+  const preview = button('', openViewer, 'photo-preview');
+  preview.setAttribute('aria-label', '写真を全画面で見る');
+  preview.setAttribute('aria-haspopup', 'dialog');
+  preview.append(el('img', { src: url, alt: '' }),
+    el('span', { className: 'photo-preview-label', 'aria-hidden': 'true' }, '拡大'));
+  return preview;
 }

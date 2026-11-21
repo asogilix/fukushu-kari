@@ -17,6 +17,7 @@ const types = {
   '.png': 'image/png',
   '.json': 'application/json; charset=utf-8',
   '.wasm': 'application/wasm',
+  '.woff2': 'font/woff2',
   '.ttf': 'font/ttf',
   '.otf': 'font/otf',
   '.pfb': 'application/x-font-type1'

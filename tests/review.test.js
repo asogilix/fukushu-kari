@@ -8,20 +8,18 @@ import {
 
 const minutesAfter = (time, minutes) => new Date(+time + minutes * 60_000);
 const importedAt = new Date(2026, 10, 21, 14);
-const firstDue = minutesAfter(importedAt, 60);
+const firstDue = importedAt;
 const newCard = newReview(importedAt);
 
-test('取りこんで59分では出ず、1時間から復習に出る', () => {
+test('取りこんだ直後から今の復習に出る', () => {
   const photos = [{ id: 'photo', importedAt: +importedAt, card: newCard }];
   assert.equal(newCard.state, State.New);
   assert.equal(newCard.last_review, null);
   assert.equal(newCard.due, firstDue.toISOString());
-  assert.deepEqual(duePhotos(photos, minutesAfter(importedAt, 59)), []);
-  assert.deepEqual(duePhotos(photos, firstDue), photos);
-  assert.deepEqual(duePhotos(photos, minutesAfter(importedAt, 61)), photos);
-  assert.equal(upcomingCount(photos, importedAt), 1);
-  assert.equal(upcomingCount(photos, firstDue), 0);
-  assert.equal(nextReviewRefresh(photos, importedAt), +firstDue);
+  assert.deepEqual(duePhotos(photos, +importedAt - 1), []);
+  assert.deepEqual(duePhotos(photos, importedAt), photos);
+  assert.equal(upcomingCount(photos, importedAt), 0);
+  assert.equal(nextReviewRefresh(photos, importedAt), +reviewDayStart(importedAt, 1));
 });
 
 test('初回に覚えてたと答えると次は1日以上先の朝4時になる', () => {

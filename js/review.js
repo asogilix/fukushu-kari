@@ -60,11 +60,11 @@ function saveCard({ due, last_review, ...card }) {
 }
 
 export function newReview(now) {
-  return createEmptyCard(new Date(+new Date(now) + HOUR), saveCard);
+  return createEmptyCard(new Date(now), saveCard);
 }
 
 export function migrateLegacyPhoto({ stage, due, title, ...photo }, now) {
-  return { ...photo, card: createEmptyCard(new Date(now), saveCard) };
+  return { ...photo, card: newReview(now) };
 }
 
 export function answerReview(card, answer, now, retention) {

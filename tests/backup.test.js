@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { makeBackup, openBackup } from '../js/backup.js';
+import { normalizePhotoPreferences } from '../js/photo-options.js';
 import { answerReview, migrateLegacyPhoto, newReview } from '../js/review.js';
 import { crc32, readZip, writeZip } from '../js/zip.js';
 
@@ -30,14 +31,19 @@ const legacy = {
 };
 
 const now = new Date(2026, 10, 21, 14);
-const first = answerReview(newReview(now), 'remembered', new Date(+now + 3_600_000));
+const first = answerReview(newReview(now), 'remembered', now);
 const second = answerReview(first.card, 'forgot', new Date(first.card.due));
 const example = {
-  folders: legacy.folders, images: legacy.images,
-  photos: [
-    { ...migrateLegacyPhoto(legacy.photos[0], now), card: second.card },
-    { ...migrateLegacyPhoto(legacy.photos[1], now), fileModifiedAt: 24, card: newReview(now) }
+  folders: [
+    ...legacy.folders.map(folder => ({ ...folder, parentId: null })),
+    { id: 'general', name: '総則', createdAt: 2, parentId: 'law' }
   ],
+  images: legacy.images,
+  photos: [
+    { ...migrateLegacyPhoto(legacy.photos[0], now), folderId: 'general', card: second.card, tags: ['star', 'question'] },
+    { ...migrateLegacyPhoto(legacy.photos[1], now), fileModifiedAt: 24, card: newReview(now), tags: [] }
+  ],
+  photoPreferences: { sort: 'memory', filter: 'question', importNote: true },
   reviewLogs: [
     { id: 'log-1', photoId: 'photo-1', ...first.log },
     { id: 'log-2', photoId: 'photo-1', ...second.log }
@@ -59,12 +65,16 @@ test('複数の Blob と日本語のファイル名を往復できる', async ()
   }
 });
 
-test('バックアップでフォルダ、画像、メモ、復習状態と記録、PDFの出典を往復できる', async () => {
+test('バックアップで写真と復習のデータ、印、一覧と取りこみのせっていを往復できる', async () => {
   const progress = [];
   const zip = await makeBackup(example, (done, total) => progress.push([done, total]));
+  const metadata = JSON.parse(await (await readZip(zip)).get('data.json').text());
+  assert.deepEqual(metadata.folders, example.folders);
+  assert.deepEqual(metadata.photoPreferences, example.photoPreferences);
   const restored = await openBackup(zip);
   assert.deepEqual(restored.folders, example.folders);
   assert.deepEqual(restored.photos, example.photos);
+  assert.deepEqual(restored.photoPreferences, example.photoPreferences);
   assert.deepEqual(restored.reviewLogs, example.reviewLogs);
   const nextDue = new Date(second.card.due);
   assert.deepEqual(answerReview(restored.photos[0].card, 'remembered', nextDue),
@@ -78,18 +88,60 @@ test('バックアップでフォルダ、画像、メモ、復習状態と記�
   }
 });
 
+test('旧版の印の名前が入ったバックアップから、写真の印と一覧・取りこみのせっていを読みこめる', async () => {
+  const entries = await readZip(await makeBackup(example));
+  const data = JSON.parse(await entries.get('data.json').text());
+  data.photoPreferences.tagNames = { star: '必ず読む', alert: 'まちがえた', question: '質問する' };
+  entries.set('data.json', new Blob([JSON.stringify(data)]));
+  const restored = await openBackup(await writeZip([...entries]));
+  assert.deepEqual(restored.photos, example.photos);
+  assert.deepEqual(restored.photoPreferences, example.photoPreferences);
+});
+
 test('最初の版のバックアップは読みこみ時点を期限にし、初回の復習として扱う', async () => {
   const zip = await writeZip([
     ['data.json', new Blob([JSON.stringify({ version: 1, folders: legacy.folders, photos: legacy.photos })])],
     ...Array.from(legacy.images, ([id, image]) => [`photos/${id}.jpg`, image.full])
   ]);
   const restored = await openBackup(zip, undefined, now);
-  assert.deepEqual(restored.folders, legacy.folders);
-  assert.deepEqual(restored.photos, legacy.photos.map(photo => migrateLegacyPhoto(photo, now)));
+  assert.deepEqual(restored.folders, legacy.folders.map(folder => ({ ...folder, parentId: null })));
+  assert.deepEqual(restored.photos, legacy.photos.map(photo => ({ ...migrateLegacyPhoto(photo, now), tags: [] })));
+  assert.equal(restored.photoPreferences, undefined);
   assert.deepEqual(restored.reviewLogs, []);
   assert.equal(restored.photos[1].card.due, now.toISOString());
   assert.equal(restored.photos[1].card.last_review, null);
   assert.deepEqual(await restored.images.get('photo-1').full.bytes(), await legacy.images.get('photo-1').full.bytes());
+});
+
+test('親の記録がない版2のバックアップも、すべて1段目として読みこめる', async () => {
+  const data = { version: 2, folders: legacy.folders, photos: [], reviewLogs: [] };
+  const zip = await writeZip([['data.json', new Blob([JSON.stringify(data)])]]);
+  const restored = await openBackup(zip);
+  assert.deepEqual(restored.folders, legacy.folders.map(folder => ({ ...folder, parentId: null })));
+});
+
+test('印とせっていの項目がない版2のバックアップは、写真を印なしで読みこめる', async () => {
+  const [{ tags, ...photo }] = example.photos;
+  const data = { version: 2, folders: example.folders, photos: [photo], reviewLogs: [] };
+  const zip = await writeZip([
+    ['data.json', new Blob([JSON.stringify(data)])], [`photos/${photo.id}.jpg`, example.images.get(photo.id).full]
+  ]);
+  const restored = await openBackup(zip);
+  assert.deepEqual(restored.photos, [{ ...photo, tags: [] }]);
+  assert.equal(restored.photoPreferences, undefined);
+});
+
+test('存在しない親、3段目、未分類の親子、循環は1段目に直す', async () => {
+  const links = [
+    ['unfiled', 'law'], ['law', null], ['general', 'law'], ['third', 'general'],
+    ['orphan', 'absent'], ['in-unfiled', 'unfiled'], ['self', 'self'],
+    ['cycle-a', 'cycle-b'], ['cycle-b', 'cycle-a']
+  ];
+  const folders = links.map(([id, parentId], createdAt) => ({ id, name: id, createdAt, parentId }));
+  const restored = await openBackup(await makeBackup({ folders, photos: [], images: new Map() }));
+  assert.deepEqual(restored.folders, folders.map(folder => ({
+    ...folder, parentId: folder.id === 'general' ? 'law' : null
+  })));
 });
 
 test('カードの日時や復習の記録が壊れたバックアップは読みこまない', async () => {
@@ -115,7 +167,9 @@ test('文章や画像が壊れたバックアップは読みこまない', async
 
 test('フォルダが空のバックアップも読みこめる', async () => {
   const empty = { folders: example.folders, photos: [], images: new Map(), reviewLogs: [] };
-  assert.deepEqual(await openBackup(await makeBackup(empty)), empty);
+  assert.deepEqual(await openBackup(await makeBackup(empty)), {
+    ...empty, photoPreferences: normalizePhotoPreferences()
+  });
 });
 
 test('数百枚の写真を一つのファイルで往復できる', async () => {

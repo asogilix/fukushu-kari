@@ -1,8 +1,8 @@
 import { APP_NAME } from './config.js';
-import { DEFAULT_FOLDER } from './db.js';
 import { renderFolder, renderHome, renderPhoto } from './library.js';
+import { showPhotoViewer } from './photo-viewer.js';
 import { el } from './ui.js';
-import { beginReview, renderImport, renderReview, renderSettings } from './workflow.js';
+import { beginReview, endReview, renderReview, renderSettings } from './workflow.js';
 
 const main = document.querySelector('#main');
 const notice = document.querySelector('#notice');
@@ -11,7 +11,7 @@ const operationText = document.querySelector('#operation-text');
 const operationProgress = document.querySelector('#operation-progress');
 const navItems = [...document.querySelectorAll('[data-tab]')];
 const screens = {
-  home: renderHome, folder: renderFolder, photo: renderPhoto, import: renderImport,
+  home: renderHome, folder: renderFolder, photo: renderPhoto,
   review: (context, _id, scope) => renderReview(context, scope),
   settings: (context, _id, scope) => renderSettings(context, scope)
 };
@@ -19,6 +19,7 @@ let renderVersion = 0;
 let disposeView = () => {};
 let noticeTimer;
 let jobRunning = false;
+let photoViewer;
 
 function route() {
   const [page, id] = location.hash.slice(1).split('/');
@@ -65,7 +66,7 @@ async function runJob(message, work) {
   progress(null, null, message);
   operation.hidden = false;
   try {
-    await work(progress);
+    await work(progress, () => { operation.hidden = true; });
   } catch (error) {
     notify(failure(error));
   } finally {
@@ -79,10 +80,37 @@ function navigate(hash) {
   else location.hash = hash;
 }
 
+function closePhotoViewer() {
+  if (!photoViewer || photoViewer.closing) return;
+  photoViewer.closing = true;
+  history.back();
+}
+
+function openPhotoViewer(options) {
+  if (photoViewer || history.state?.photoViewer) return;
+  const origin = location.href;
+  const view = showPhotoViewer(options, closePhotoViewer);
+  try {
+    // Give the system Back gesture one same-URL entry to leave before leaving the photo page.
+    history.pushState({ photoViewer: true }, '');
+  } catch (error) {
+    view.close();
+    notify(failure(error));
+    return;
+  }
+  photoViewer = { view, origin, photoId: options.photoId };
+}
+
+function disposePhotoViewer() {
+  const active = photoViewer;
+  photoViewer = undefined;
+  return active.view.close();
+}
+
 const ctx = {
-  notify, guard, runJob, navigate,
-  reviewFolder: '', importFolder: DEFAULT_FOLDER,
-  installed: matchMedia('(display-mode: standalone)').matches,
+  notify, guard, runJob, navigate, openPhotoViewer,
+  installed: navigator.standalone === true ||
+    matchMedia('(display-mode: standalone), (display-mode: fullscreen), (display-mode: minimal-ui)').matches,
   installPrompt: null,
   startReview(photos, folder) {
     beginReview(photos, folder);
@@ -95,6 +123,12 @@ const ctx = {
 };
 
 async function render(navigated = false) {
+  if (photoViewer && !navigated) {
+    photoViewer.refresh = true;
+    closePhotoViewer();
+    return;
+  }
+  if (photoViewer) disposePhotoViewer();
   disposeView();
   const version = ++renderVersion;
   const cleanups = [];
@@ -127,10 +161,10 @@ async function render(navigated = false) {
     }
   };
   const [page, id] = route();
+  if (page !== 'review') endReview();
   main.dataset.page = page;
   if (navigated) {
-    const dialog = document.querySelector('#dialog');
-    if (dialog.open) dialog.close('');
+    for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close('');
     main.replaceChildren(el('p', { className: 'empty' }, '開いています。'));
     window.scrollTo(0, 0);
   }
@@ -150,7 +184,7 @@ async function render(navigated = false) {
     if (!current()) return;
     main.replaceChildren(el('p', { className: 'empty' }, failure(error)));
   }
-  const tab = ['home', 'folder', 'photo', 'review'].includes(page) ? 'home' : page;
+  const tab = page === 'settings' ? 'settings' : 'home';
   for (const item of navItems) {
     if (item.dataset.tab === tab) item.setAttribute('aria-current', 'page');
     else item.removeAttribute('aria-current');
@@ -159,7 +193,24 @@ async function render(navigated = false) {
 
 document.title = APP_NAME;
 document.querySelector('#app-name').textContent = APP_NAME;
-window.addEventListener('hashchange', () => render(true));
+window.addEventListener('popstate', () => {
+  if (history.state?.photoViewer) {
+    // A closed viewer's entry can still be reached by Forward.
+    history.back();
+    return;
+  }
+  if (!photoViewer) return;
+  const { origin, photoId, refresh } = photoViewer;
+  const lastId = disposePhotoViewer();
+  if (location.href !== origin) return;
+  if (lastId !== photoId) {
+    history.replaceState(history.state, '', `#photo/${lastId}`);
+    render(true);
+  } else if (refresh) render();
+});
+window.addEventListener('hashchange', () => {
+  if (!history.state?.photoViewer) render(true);
+});
 window.addEventListener('beforeinstallprompt', event => {
   event.preventDefault();
   ctx.installPrompt = event;
@@ -172,4 +223,5 @@ navigator.storage?.persist?.().catch(() => {});
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).catch(() => {});
 }
+if (history.state?.photoViewer) history.back();
 render();

@@ -57,16 +57,16 @@ function roundedRect(x, y, left, top, right, bottom, radius) {
 }
 
 function iconColor(x, y) {
-  if (roundedRect(x, y, 22, 22, 79, 79, 12)) return [255, 249, 224];
-  if (roundedRect(x, y, 17, 17, 73, 73, 11)) return [139, 191, 161];
-  return [26, 67 + Math.round((100 - y) / 9), 52 + Math.round((100 - y) / 12)];
+  if (roundedRect(x, y, 22, 22, 79, 79, 12)) return [255, 255, 255];
+  if (roundedRect(x, y, 17, 17, 73, 73, 11)) return [182, 210, 252];
+  return [47, 107, 219];
 }
 
 function markColor(x, y) {
-  if (x >= 65 && x <= 73 && y >= 25 && y <= 45 - Math.min(x - 65, 73 - x)) return [230, 163, 70];
-  if ((x - 40) ** 2 + (y - 44) ** 2 < 19) return [222, 165, 75];
+  if (x >= 65 && x <= 73 && y >= 25 && y <= 45 - Math.min(x - 65, 73 - x)) return [242, 169, 59];
+  if ((x - 40) ** 2 + (y - 44) ** 2 < 19) return [242, 169, 59];
   if (x >= 32 && x <= 69 && y <= 69 && y >= Math.min(50 + Math.abs(x - 54), 57 + Math.abs(x - 39))) {
-    return [44, 104, 78];
+    return [36, 87, 184];
   }
   return iconColor(x, y);
 }
@@ -120,7 +120,7 @@ for (const [index, size] of [192, 512].entries()) await write(icons[index].src, 
 await write('manifest.webmanifest', JSON.stringify({
   id: './', name: APP_NAME, short_name: APP_NAME,
   lang: 'ja', start_url: './', scope: './', display: 'standalone',
-  background_color: '#f5f7f2', theme_color: '#f5f7f2', icons
+  background_color: '#FFFFFF', theme_color: '#FFFFFF', icons
 }, null, 2) + '\n');
 
 const assets = [
