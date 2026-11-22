@@ -73,15 +73,14 @@ export function actionSheet(title, actions) {
   const sheet = document.querySelector('#action-sheet');
   if (sheet.open) return;
   const close = () => sheet.close();
-  const items = actions.map(({ label, run, disabled = false, danger, current }) =>
+  const items = actions.map(({ label, run, disabled = false, danger }) =>
     el('button', {
       type: 'button', className: danger ? 'sheet-action danger' : 'sheet-action', disabled,
-      ...(current ? { 'aria-current': 'true' } : {}),
       onclick() {
         close();
         run();
       }
-    }, label, current && el('span', { 'aria-hidden': 'true' }, ' ✓')));
+    }, label));
   sheet.replaceChildren(el('h2', { id: 'sheet-title' }, title), ...items,
     button('閉じる', close, 'button sheet-close'));
   sheet.showModal();

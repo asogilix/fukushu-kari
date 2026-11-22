@@ -231,4 +231,4 @@ self.APP_ASSETS = [
   "vendor/zen-maru-gothic/ZenMaruGothic-Bold.woff2",
   "vendor/zen-maru-gothic/ZenMaruGothic-Medium.woff2"
 ];
-self.APP_CACHE_VERSION = 'c8584d40b9ac0a49';
+self.APP_CACHE_VERSION = 'ffc2d358c8afbded';

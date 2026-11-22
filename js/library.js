@@ -48,7 +48,7 @@ async function editFolder(ctx, { folder, parent, locations }) {
   ctx.refresh();
 }
 
-function folderRow(folder, { total, due }, child = false) {
+function folderRow(folder, { total, due }, { child = false, showChevron = false } = {}) {
   const markClass = folder.id === db.DEFAULT_FOLDER ? 'folder-mark folder-mark-unfiled' : 'folder-mark';
   return el('a', { className: 'folder-row', href: `#folder/${folder.id}` },
     el('span', { className: markClass, 'aria-hidden': 'true' }),
@@ -57,12 +57,13 @@ function folderRow(folder, { total, due }, child = false) {
       el('span', { className: 'visually-hidden' }, '今の復習 '), String(due),
       el('span', { className: 'visually-hidden' }, '枚')),
     el('span', { className: 'folder-total' },
-      el('span', { className: 'visually-hidden' }, '写真 '), `${total}枚`));
+      el('span', { className: 'visually-hidden' }, '写真 '), `${total}枚`),
+    showChevron && el('span', { className: 'folder-row-chevron', 'aria-hidden': 'true' }, '›'));
 }
 
-function childFolderList(folders, counts) {
+function childFolderList(folders, counts, { showChevron = false } = {}) {
   return el('ul', { className: 'folder-list child-folders' },
-    folders.map(folder => el('li', {}, folderRow(folder, counts.get(folder.id), true))));
+    folders.map(folder => el('li', {}, folderRow(folder, counts.get(folder.id), { child: true, showChevron }))));
 }
 
 function homeFolderList(folders, counts) {
@@ -130,7 +131,8 @@ function photoTitle(photo) {
   return formatDateTime(photo.fileModifiedAt ?? photo.importedAt);
 }
 
-function thumbnails(photos, scope) {
+function thumbnails(scope) {
+  const tiles = new Map();
   async function load(image) {
     try {
       const record = await db.getImage(image.dataset.photoId);
@@ -147,58 +149,80 @@ function thumbnails(photos, scope) {
     }
   }, { rootMargin: '240px' });
   scope.onLeave(() => observer.disconnect());
-  const tiles = photos.map(photo => {
+  return photos => photos.map(photo => {
+    if (tiles.has(photo.id)) return tiles.get(photo.id);
     const image = el('img', { alt: '', 'data-photo-id': photo.id, decoding: 'async' });
     observer.observe(image);
     const title = photo.note.split(/\r?\n/, 1)[0].trim() || photoTitle(photo);
     const tags = normalizePhotoTags(photo.tags);
     const marks = TAGS.filter(tag => tags.includes(tag.id));
-    return el('li', {}, el('a', { className: 'tile', href: `#photo/${photo.id}` },
+    const tile = el('li', {}, el('a', { className: 'tile', href: `#photo/${photo.id}` },
       el('span', { className: 'tile-image' }, image,
         marks.length > 0 && el('span', { className: 'tile-tags' }, marks.map(tagDot))),
       el('span', { className: 'tile-title', title }, title),
       marks.length > 0 && el('span', { className: 'visually-hidden' }, marks.map(tag => `${tag.color}の印`).join('、'))));
+    tiles.set(photo.id, tile);
+    return tile;
   });
-  return el('ul', { className: 'tiles' }, tiles);
 }
 
 function folderPhotoList(ctx, folder, photos, preferences, now, scope) {
-  const visible = selectPhotos(photos, preferences, now);
-  const { sort, filter } = preferences;
-  const selectedTag = TAGS.find(tag => tag.id === filter);
-  const apply = changes => ctx.guard(async () => {
-    await db.updatePhotoPreferences(changes);
-    if (scope.current()) ctx.refresh();
+  let selected = preferences;
+  const choose = (key, value) => ctx.guard(async () => {
+    if (selected[key] === value || !scope.current()) return;
+    await db.updatePhotoPreferences({ [key]: value });
+    const saved = await db.getPhotoPreferences();
+    if (!scope.current()) return;
+    selected = saved;
+    update(new Date());
   });
-  const sortButton = button('並べかえ', () => actionSheet('並べかえ', PHOTO_SORTS.map(({ id, label }) => ({
-    label, current: id === sort, run: id === sort ? () => {} : apply({ sort: id })
-  }))), 'button small');
-  sortButton.setAttribute('aria-haspopup', 'dialog');
-  const filterButton = (id, tag) => el('button', {
-    type: 'button', className: tag ? 'button tag-filter-button' : 'button small tag-filter-all',
-    'aria-pressed': String(id === filter),
-    ...(tag ? { 'aria-label': `${tag.color}の印でしぼりこむ` } : {}),
-    onclick: id === filter ? undefined : apply({ filter: id })
-  }, tag ? tagDot(tag) : 'すべて');
-  return el('section', { className: 'section' },
+  const sorts = PHOTO_SORTS.map(({ id, label }) => el('button', {
+    type: 'button', className: 'sort-choice', 'data-sort': id, onclick: choose('sort', id)
+  }, label));
+  const filters = [
+    el('button', {
+      type: 'button', className: 'button small tag-filter-all', 'data-filter': 'all', onclick: choose('filter', 'all')
+    }, 'すべて'),
+    ...TAGS.map(tag => el('button', {
+      type: 'button', className: 'button tag-filter-button', 'data-filter': tag.id,
+      'aria-label': `${tag.color}の印でしぼりこむ`, onclick: choose('filter', tag.id)
+    }, tagDot(tag)))
+  ];
+  const status = el('p', { className: 'photo-filter-status', role: 'status' });
+  const tiles = el('ul', { className: 'tiles' });
+  const getTiles = thumbnails(scope);
+  const empty = el('p', { className: 'empty' },
+    photos.length ? 'この印がついた写真はありません。' : 'このフォルダには、まだ写真がありません。');
+
+  function update(at) {
+    const visible = selectPhotos(photos, selected, at);
+    for (const choice of sorts) choice.setAttribute('aria-pressed', String(choice.dataset.sort === selected.sort));
+    for (const choice of filters) choice.setAttribute('aria-pressed', String(choice.dataset.filter === selected.filter));
+    const tag = TAGS.find(({ id }) => id === selected.filter);
+    status.hidden = !tag;
+    if (tag) status.replaceChildren(
+      el('span', { className: 'visually-hidden' }, `${tag.color}の印でしぼりこみ中`),
+      tagDot(tag), `（${visible.length}枚）`);
+    tiles.hidden = visible.length === 0;
+    tiles.replaceChildren(...getTiles(visible));
+    empty.hidden = !tiles.hidden;
+  }
+
+  update(now);
+  return el('section', { className: 'section folder-card' },
     el('h2', {}, `${folder.name}の写真`),
-    el('div', { className: 'photo-list-controls' },
-      sortButton,
-      el('span', { className: 'muted' }, PHOTO_SORTS.find(option => option.id === sort).label)),
-    el('div', { className: 'photo-filter-controls', role: 'group', 'aria-labelledby': 'photo-filter-label' },
-      el('span', { id: 'photo-filter-label', className: 'muted' }, 'しぼりこみ'),
-      filterButton('all'), TAGS.map(tag => filterButton(tag.id, tag))),
-    selectedTag && el('p', { className: 'photo-filter-status', role: 'status' },
-      el('span', { className: 'visually-hidden' }, `${selectedTag.color}の印でしぼりこみ中`),
-      tagDot(selectedTag), `（${visible.length}枚）`),
-    visible.length ? thumbnails(visible, scope) : el('p', { className: 'empty' },
-      photos.length ? 'この印がついた写真はありません。' : 'このフォルダには、まだ写真がありません。'));
+    el('div', { className: 'photo-toolbelt' },
+      el('div', { className: 'sort-control', role: 'group', 'aria-label': '並べかえ' }, sorts),
+      el('div', { className: 'photo-filter-controls', role: 'group', 'aria-labelledby': 'photo-filter-label' },
+        el('span', { id: 'photo-filter-label' }, 'しぼりこみ'),
+        el('div', { className: 'photo-filter-options' }, filters))),
+    status, tiles, empty);
 }
 
 export async function renderFolder(ctx, id, scope) {
   const [all, folders, preferences] = await Promise.all([db.listPhotos(), db.listFolders(), db.getPhotoPreferences()]);
   const folder = folders.find(record => record.id === id);
-  if (!folder) return [heading('フォルダが見つかりません', 'ほーむへ', '#home')];
+  if (!folder) return [heading('フォルダが見つかりません', 'ほーむ\u2002へ', '#home')];
   const parent = folders.find(record => record.id === folder.parentId);
   const children = folderTree(folders).find(entry => entry.folder.id === id)?.children ?? [];
   const photos = all.filter(photo => photo.folderId === id);
@@ -229,7 +253,7 @@ export async function renderFolder(ctx, id, scope) {
     const queue = duePhotos(latestPhotos.filter(photo => latestBranch.has(photo.folderId)), new Date());
     if (queue.length) ctx.startReview(queue, folder);
     else ctx.refresh();
-  }), 'button primary folder-review');
+  }), 'button folder-review');
   start.disabled = due === 0;
 
   const destinations = parent ? folders.filter(record => canHaveChildren(record) && record.id !== parent.id) : [];
@@ -250,7 +274,7 @@ export async function renderFolder(ctx, id, scope) {
     actionSheet('そのほかの操作', folderMenuItems(folder, destinations.length > 0).map(item => ({
       ...item, run: actions[item.id]
     })));
-  }, 'button small more-button');
+  }, 'button more-button');
   more.setAttribute('aria-label', 'そのほかの操作');
   more.setAttribute('aria-haspopup', 'dialog');
   const separator = () => el('span', { 'aria-hidden': 'true' }, '›');
@@ -261,19 +285,20 @@ export async function renderFolder(ctx, id, scope) {
 
   return [
     el('header', { className: 'page-heading' }, breadcrumb,
-      el('div', { className: 'folder-heading' }, el('h1', {}, folder.name),
-        el('span', { className: 'muted folder-total' }, `写真 ${total}枚`))),
-    el('div', { className: 'folder-operations' }, start,
-      el('div', { className: 'folder-controls' }, folderImport(ctx, id), more)),
-    children.length > 0 && el('section', { className: 'section' },
-      el('h2', {}, '中のフォルダ'), childFolderList(children, counts)),
+      el('div', { className: 'folder-summary' },
+        el('div', { className: 'folder-heading' }, el('h1', {}, folder.name),
+          el('span', { className: 'folder-total' }, `写真 ${total}枚`)),
+        el('div', { className: 'folder-operations' }, start,
+          el('div', { className: 'folder-controls' }, folderImport(ctx, id), more)))),
+    children.length > 0 && el('section', { className: 'section folder-card child-folders-card' },
+      el('h2', {}, `${folder.name}の中のフォルダ`), childFolderList(children, counts, { showChevron: true })),
     folderPhotoList(ctx, folder, photos, preferences, now, scope)
   ];
 }
 
 export async function renderPhoto(ctx, id, scope) {
   const [photo, image, folders] = await Promise.all([db.getPhoto(id), db.getImage(id), db.listFolders()]);
-  if (!photo || !image?.full) return [heading('写真が見つかりません', 'ほーむへ', '#home')];
+  if (!photo || !image?.full) return [heading('写真が見つかりません', 'ほーむ\u2002へ', '#home')];
   const back = `#folder/${photo.folderId}`;
   const due = el('p', { className: 'due-info' });
   const memory = el('p', { className: 'muted' });

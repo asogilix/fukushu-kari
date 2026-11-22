@@ -42,7 +42,7 @@ export async function renderReview(ctx, scope) {
     active.queue.shift();
     photo = undefined;
   }
-  const title = heading('今の復習', 'ほーむへ', '#home');
+  const title = heading('今の復習', 'ほーむ\u2002へ', '#home');
   if (!photo) {
     let forgotten = 0;
     if (active.forgotten.size) {
@@ -57,7 +57,7 @@ export async function renderReview(ctx, scope) {
         el('h2', {}, active.answered ? '今回の復習が終わりました' : '復習する写真はありません'),
         active.answered > 0 && description(`${active.answered}枚を復習しました。`),
         forgotten > 0 && description(`忘れた${forgotten}枚は、10分後にもう一度出ます`),
-        link('ほーむに戻る', '#home', 'button primary'))
+        link('ほーむ\u2002に戻る', '#home', 'button primary'))
     ];
   }
 
@@ -255,7 +255,7 @@ export function folderImport(ctx, folderId) {
     { label: 'カメラで撮る', run: () => camera.click() },
     { label: 'スマホの写真を選ぶ', run: () => gallery.click() },
     { label: 'PDF を選ぶ', run: () => pdf.click() }
-  ]), 'button small');
+  ]));
   open.setAttribute('aria-haspopup', 'dialog');
   return [open, camera, gallery, pdf];
 }
@@ -320,10 +320,10 @@ export async function renderSettings(ctx, scope) {
   }
   scope.onLeave(clearDownload);
   const usage = el('p', { className: 'muted' }, '使っている容量を調べています。');
-  const protection = el('p', { className: 'muted' }, '保存のせっていを調べています。');
+  const protection = el('p', { className: 'muted' }, '保存の\u2002せってい\u2002を調べています。');
   const persist = button('写真を消えにくくする', ctx.guard(async () => {
     const granted = await navigator.storage?.persist?.();
-    ctx.notify(granted ? '写真を消えにくくするせっていが有効になりました。' : 'ブラウザから許可が得られませんでした。');
+    ctx.notify(granted ? '写真を消えにくくする\u2002せってい\u2002が有効になりました。' : 'ブラウザから許可が得られませんでした。');
     await updateStorage();
   }));
   async function updateStorage() {
@@ -333,7 +333,7 @@ export async function renderSettings(ctx, scope) {
     usage.textContent = Number.isFinite(estimate.value?.usage) ?
       `使っている容量の目安：${storageAmount(estimate.value.usage)}` : '使っている容量はわかりません。';
     protection.textContent = persistent.value ?
-      '写真を消えにくくするせっていが有効です。' : '写真を消えにくくするせっていは有効になっていません。';
+      '写真を消えにくくする\u2002せってい\u2002が有効です。' : '写真を消えにくくする\u2002せってい\u2002は有効になっていません。';
     persist.disabled = Boolean(persistent.value);
     persist.hidden = !navigator.storage?.persist;
   }
@@ -342,7 +342,7 @@ export async function renderSettings(ctx, scope) {
     const blob = await makeBackup(await db.backupSnapshot(), (done, total) =>
       progress(done, total, `バックアップを作っています（${done}／${total}件）`));
     if (!scope.current()) {
-      ctx.notify('バックアップを保存するには、せっていで作り直してください。');
+      ctx.notify('バックアップを保存するには、せってい\u2002で作り直してください。');
       return;
     }
     clearDownload();
@@ -364,7 +364,7 @@ export async function renderSettings(ctx, scope) {
   }), 'button primary');
   const restore = fileInput({ accept: '.zip,application/zip' }, ctx.guard(async ([file]) => {
     const approved = await dialog('バックアップを読みこみますか？',
-      el('p', {}, '今の写真帳に追加します。同じ写真やフォルダがある場合は、ファイルの内容で上書きします。一覧と取りこみのせっていも読みこみます。'),
+      el('p', {}, '今の写真帳に追加します。同じ写真やフォルダがある場合は、ファイルの内容で上書きします。一覧と取りこみの\u2002せってい\u2002も読みこみます。'),
       [['やめる', ''], ['読みこむ', 'restore', 'button primary']]);
     if (!approved) return;
     ctx.runJob('バックアップを調べています。', async progress => {
@@ -406,13 +406,13 @@ export async function renderSettings(ctx, scope) {
   scope.listen(window, 'appinstalled', showInstall);
 
   return [
-    heading('せってい', 'ほーむへ', '#home'),
+    heading('せってい', 'ほーむ\u2002へ', '#home'),
     el('section', { className: 'panel' }, el('h2', {}, '取りこみ'),
       el('label', { className: 'toggle' }, importNote, '取りこんだ直後にメモ欄を出す')),
     el('section', { className: 'panel' }, el('h2', {}, '復習'), labeled('覚えている確率の目標', goal),
       description('高くすると、次の復習までの間隔が短くなります。次に答えたときから反映します。')),
     el('section', { className: 'panel' }, el('h2', {}, 'バックアップ'), age, reminder,
-      description('写真、メモ、印、フォルダ、復習の予定と記録、一覧と取りこみのせっていをひとつのファイルにまとめます。'),
+      description('写真、メモ、印、フォルダ、復習の予定と記録、一覧と取りこみの\u2002せってい\u2002をひとつのファイルにまとめます。'),
       el('div', { className: 'actions' }, exportBackup,
         button('バックアップを読みこむ', () => restore.click()), restore), download),
     el('section', { className: 'panel' }, el('h2', {}, 'スマホの保存容量'), usage, protection, persist),
