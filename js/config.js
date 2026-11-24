@@ -1,1 +1,1 @@
-export const APP_NAME = 'ふくしゅう写真帳';
+export const APP_NAME = 'わすれな帳';
