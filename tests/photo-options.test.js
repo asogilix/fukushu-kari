@@ -54,6 +54,17 @@ test('忘れていそうな順は未回答が先で、同じ見こみは取り�
     ['unanswered-first', 'unanswered-later', 'lower', 'higher-first', 'a', 'b', 'excluded']);
 });
 
+test('自分の順は順番をつけた写真が先で、残りは取りこんだ古い順になる', () => {
+  const photos = [photo('later', 2), { ...photo('second', 3), position: 1 },
+    photo('earlier', 1), { ...photo('first', 4), position: 0 }];
+  assert.deepEqual(ids(selectPhotos(photos, { sort: 'manual', filter: 'all' }, now)),
+    ['first', 'second', 'earlier', 'later']);
+});
+
+test('一覧のせっていで自分の順を選べる', () => {
+  assert.equal(normalizePhotoPreferences({ sort: 'manual' }).sort, 'manual');
+});
+
 test('一覧と取りこみのせっていは不明な値を初期値に戻す', () => {
   assert.deepEqual(defaultPreferences, { sort: 'oldest', filter: 'all', importNote: false });
   assert.deepEqual(normalizePhotoPreferences({ sort: 'unknown', filter: 'unknown', importNote: 'true' }),

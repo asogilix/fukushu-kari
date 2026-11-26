@@ -73,7 +73,7 @@ export async function openBackup(file, onProgress, now = new Date()) {
     requireBackup(photo && validId(photo.id) && !images.has(photo.id) &&
       folderIds.has(photo.folderId) && nonnegativeInteger(photo.importedAt) &&
       typeof photo.note === 'string' && typeof photo.excluded === 'boolean');
-    const { id, folderId, importedAt, excluded, note, source, fileModifiedAt, card } = photo;
+    const { id, folderId, importedAt, excluded, note, source, fileModifiedAt, card, position } = photo;
     requireBackup(source === null ||
       (source && typeof source.name === 'string' && Number.isSafeInteger(source.page) && source.page > 0));
     if (legacy) {
@@ -91,7 +91,8 @@ export async function openBackup(file, onProgress, now = new Date()) {
     });
     const record = {
       id, folderId, importedAt, excluded, note, source: source && { name: source.name, page: source.page },
-      tags: normalizePhotoTags(photo.tags)
+      tags: normalizePhotoTags(photo.tags),
+      ...(nonnegativeInteger(position) ? { position } : {})
     };
     if (legacy) return { ...record, card: migrateLegacyPhoto(photo, now).card };
     return { ...record, card, ...(fileModifiedAt === undefined ? {} : { fileModifiedAt }) };

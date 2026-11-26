@@ -98,6 +98,14 @@ test('旧版の印の名前が入ったバックアップから、写真の印�
   assert.deepEqual(restored.photoPreferences, example.photoPreferences);
 });
 
+test('自分の順と写真の順番をバックアップで往復できる', async () => {
+  const photos = [{ ...example.photos[0], position: 0 }, example.photos[1]];
+  const photoPreferences = { ...example.photoPreferences, sort: 'manual' };
+  const restored = await openBackup(await makeBackup({ ...example, photos, photoPreferences }));
+  assert.deepEqual(restored.photos, photos);
+  assert.deepEqual(restored.photoPreferences, photoPreferences);
+});
+
 test('最初の版のバックアップは読みこみ時点を期限にし、初回の復習として扱う', async () => {
   const zip = await writeZip([
     ['data.json', new Blob([JSON.stringify({ version: 1, folders: legacy.folders, photos: legacy.photos })])],
@@ -120,7 +128,7 @@ test('親の記録がない版2のバックアップも、すべて1段目とし
   assert.deepEqual(restored.folders, legacy.folders.map(folder => ({ ...folder, parentId: null })));
 });
 
-test('印とせっていの項目がない版2のバックアップは、写真を印なしで読みこめる', async () => {
+test('印、順番、せっていの項目がない版2のバックアップも読みこめる', async () => {
   const [{ tags, ...photo }] = example.photos;
   const data = { version: 2, folders: example.folders, photos: [photo], reviewLogs: [] };
   const zip = await writeZip([

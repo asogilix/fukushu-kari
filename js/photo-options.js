@@ -9,7 +9,8 @@ export const TAGS = [
 export const PHOTO_SORTS = [
   { id: 'newest', label: '新しい順' },
   { id: 'oldest', label: '古い順' },
-  { id: 'memory', label: '忘れていそうな順' }
+  { id: 'memory', label: '忘れていそうな順' },
+  { id: 'manual', label: '自分の順' }
 ];
 
 export function normalizePhotoTags(tags) {
@@ -36,6 +37,8 @@ export function selectPhotos(photos, { sort, filter }, now) {
   const sortKey = photo => {
     if (sort === 'newest') return -photo.importedAt;
     if (sort === 'memory') return photo.excluded ? Infinity : (retrievability(photo.card, now) ?? -1);
+    if (sort === 'manual') return Number.isSafeInteger(photo.position) && photo.position >= 0
+      ? photo.position : Infinity;
     return photo.importedAt;
   };
   return visible.map(photo => ({ photo, key: sortKey(photo) }))

@@ -170,6 +170,7 @@ test('2段目を消し、写真と復習の記録を残して親へ移す', asyn
   const item = photo('child', 'general');
   const log = { id: 'log', photoId: item.id };
   const db = await setup(t, [item], [log]);
+  await db.reorderPhotos('general', [item.id]);
   await db.deleteFolder('general', true);
   assert.deepEqual(await db.listFolders(), [unfiled, law, other]);
   assert.deepEqual(await db.getPhoto(item.id), { ...item, folderId: 'law' });
@@ -253,6 +254,26 @@ test('保存済みの due は古い順に戻り、ほかのせっていは保つ
   const db = await setup(t, []);
   await db.setSetting('photoPreferences', { sort: 'due', filter: 'alert', importNote: true });
   assert.deepEqual(await db.getPhotoPreferences(), { sort: 'oldest', filter: 'alert', importNote: true });
+});
+
+test('フォルダ内の写真に順番をつけ、別のフォルダへ移した写真の順番は消す', async t => {
+  const first = photo('first', 'law');
+  const second = photo('second', 'law');
+  const outside = { ...photo('outside', 'general'), position: 2 };
+  const db = await setup(t, [first, second, outside]);
+  await db.updatePhotoPreferences({ sort: 'newest', importNote: true });
+  await assert.rejects(db.reorderPhotos('law', ['second', 'outside']), /一覧が変わりました/);
+  assert.deepEqual(await db.listPhotos(), [first, second, outside]);
+  assert.equal((await db.getPhotoPreferences()).sort, 'newest');
+
+  await db.reorderPhotos('law', ['second', 'first']);
+  assert.deepEqual(await db.listPhotos(), [{ ...first, position: 1 }, { ...second, position: 0 }, outside]);
+  assert.deepEqual(await db.getPhotoPreferences(), { sort: 'manual', filter: 'all', importNote: true });
+
+  await db.updatePhoto(first.id, { folderId: 'law', note: '同じフォルダ' });
+  assert.equal((await db.getPhoto(first.id)).position, 1);
+  await db.updatePhoto(first.id, { folderId: 'general' });
+  assert.deepEqual(await db.getPhoto(first.id), { ...first, folderId: 'general', note: '同じフォルダ' });
 });
 
 test('印とせっていを保存して復元し、せっていの項目がない古いバックアップでは現在のせっていを保つ', async t => {

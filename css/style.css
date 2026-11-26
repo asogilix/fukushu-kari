@@ -573,7 +573,7 @@ textarea { resize: vertical; }
 
 .sort-control {
   display: grid;
-  grid-template-columns: 1fr .85fr 1.72fr;
+  grid-template-columns: repeat(4, minmax(max-content, 1fr));
   border: 1px solid var(--control-border);
   border-radius: 10px;
   background: var(--surface);
@@ -598,6 +598,16 @@ textarea { resize: vertical; }
 .sort-choice:focus-visible { position: relative; z-index: 1; outline-offset: -3px; }
 .sort-choice[aria-pressed="true"]:focus-visible { outline-color: var(--surface); }
 
+@media (max-width: 380px) {
+  .sort-control { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sort-choice:nth-child(odd) { border-inline-start: 0; }
+  .sort-choice:nth-child(n+3) { border-block-start: 1px solid var(--control-border); }
+  .sort-choice:nth-child(1) { border-radius: 9px 0 0 0; }
+  .sort-choice:nth-child(2) { border-radius: 0 9px 0 0; }
+  .sort-choice:nth-child(3) { border-radius: 0 0 0 9px; }
+  .sort-choice:nth-child(4) { border-radius: 0 0 9px 0; }
+}
+
 .photo-filter-controls, .photo-filter-status {
   display: flex;
   align-items: center;
@@ -606,9 +616,28 @@ textarea { resize: vertical; }
   font-size: .875rem;
 }
 
-.photo-filter-controls { justify-content: space-between; white-space: nowrap; }
-.photo-filter-options { display: flex; flex: none; gap: 6px; }
-.photo-filter-options .tag-filter-all { padding-inline: 8px; }
+/* せまい画面では「しぼりこみ」を上の行に出し、ボタンが枠からはみ出さないようにする */
+.photo-filter-controls { flex-wrap: wrap; justify-content: space-between; gap: 0 6px; white-space: nowrap; }
+/* ボタンは横いっぱいに等しい間かくで並べる（広い画面では広がりすぎないように上限あり） */
+.photo-filter-options { display: flex; flex: 1 0 auto; justify-content: space-between; gap: 4px; max-width: 18rem; }
+
+/* 「すべて」：押せる大きさは 44px のまま、見える枠だけ小さくする */
+.photo-filter-options .button.tag-filter-all {
+  position: relative;
+  isolation: isolate;
+  padding-inline: 8px;
+  border: 0;
+  background: transparent;
+}
+.photo-filter-options .tag-filter-all::before {
+  position: absolute;
+  inset: 7px 0;
+  z-index: -1;
+  border: 1px solid var(--blue);
+  border-radius: 999px;
+  background: var(--surface);
+  content: "";
+}
 
 .photo-filter-status {
   width: fit-content;
@@ -619,6 +648,7 @@ textarea { resize: vertical; }
 }
 
 .photo-filter-status .tag-dot { width: 18px; height: 18px; }
+.photo-reorder-hint { color: var(--soft); font-size: .8125rem; }
 
 .panel {
   display: grid;
@@ -651,8 +681,9 @@ textarea { resize: vertical; }
   background: transparent;
 }
 
-.photo-filter-options .tag-filter-button[aria-pressed="true"] { border-color: var(--ink); background: var(--surface); }
-.photo-filter-options .tag-filter-all[aria-pressed="true"] { background: var(--raised); border-color: var(--blue-deep); }
+/* 選んでいる印は、丸のすぐ外に細い輪を出す（大きな丸で囲まない） */
+.photo-filter-options .tag-filter-button[aria-pressed="true"] .tag-dot { box-shadow: 0 0 0 2px var(--raised), 0 0 0 4px var(--ink); }
+.photo-filter-options .tag-filter-all[aria-pressed="true"]::before { border: 2px solid var(--blue-deep); background: var(--raised); }
 
 .tag-star { --tag-color: var(--tag-star); }
 .tag-alert { --tag-color: var(--tag-alert); --tag-border: var(--tag-alert-border); }
@@ -697,6 +728,31 @@ textarea { resize: vertical; }
   color: var(--ink);
   text-decoration: none;
   box-shadow: var(--shadow);
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.folder-card .tiles.reordering-photos { overflow-anchor: none; }
+.folder-card .photo-drop-slot {
+  outline: 2px dashed var(--blue);
+  outline-offset: -2px;
+  border-radius: 14px;
+  background: var(--raised);
+}
+.folder-card .photo-drop-slot > .tile { visibility: hidden; }
+.photo-drag-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 6;
+  overflow: hidden;
+  pointer-events: none;
+}
+.folder-card .tile-in-hand {
+  position: absolute;
+  inset: 0 auto auto 0;
+  border-color: var(--blue-deep);
+  box-shadow: 0 10px 26px #23344966;
 }
 
 .tile:hover { border-color: var(--blue); }
@@ -916,6 +972,7 @@ html:has(.photo-viewer[open]) { overflow: hidden; overscroll-behavior: none; }
 .sheet-close { margin-block-start: 6px; }
 
 @media (prefers-reduced-motion: no-preference) {
+  .folder-card .tile-in-hand { scale: 1.05; }
   .action-sheet[open] { animation: sheet-in .16s ease-out; }
 
   @keyframes sheet-in {

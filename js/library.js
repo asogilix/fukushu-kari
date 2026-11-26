@@ -1,6 +1,7 @@
 import * as db from './db.js';
 import { canHaveChildren, folderCounts, folderIdsInBranch, folderLocations, folderMenuItems, folderTree } from './folders.js';
 import { normalizePhotoTags, PHOTO_SORTS, selectPhotos, TAGS } from './photo-options.js';
+import { enablePhotoReorder } from './photo-reorder.js';
 import { viewerPhotoIds } from './photo-viewer-logic.js';
 import { duePhotos, nextReviewRefresh, retrievability, reviewIsDue } from './review.js';
 import {
@@ -151,16 +152,17 @@ function thumbnails(scope) {
   scope.onLeave(() => observer.disconnect());
   return photos => photos.map(photo => {
     if (tiles.has(photo.id)) return tiles.get(photo.id);
-    const image = el('img', { alt: '', 'data-photo-id': photo.id, decoding: 'async' });
+    const image = el('img', { alt: '', 'data-photo-id': photo.id, decoding: 'async', draggable: false });
     observer.observe(image);
     const title = photo.note.split(/\r?\n/, 1)[0].trim() || photoTitle(photo);
     const tags = normalizePhotoTags(photo.tags);
     const marks = TAGS.filter(tag => tags.includes(tag.id));
-    const tile = el('li', {}, el('a', { className: 'tile', href: `#photo/${photo.id}` },
-      el('span', { className: 'tile-image' }, image,
-        marks.length > 0 && el('span', { className: 'tile-tags' }, marks.map(tagDot))),
-      el('span', { className: 'tile-title', title }, title),
-      marks.length > 0 && el('span', { className: 'visually-hidden' }, marks.map(tag => `${tag.color}の印`).join('、'))));
+    const tile = el('li', { 'data-photo-id': photo.id },
+      el('a', { className: 'tile', href: `#photo/${photo.id}`, draggable: false },
+        el('span', { className: 'tile-image' }, image,
+          marks.length > 0 && el('span', { className: 'tile-tags' }, marks.map(tagDot))),
+        el('span', { className: 'tile-title', title }, title),
+        marks.length > 0 && el('span', { className: 'visually-hidden' }, marks.map(tag => `${tag.color}の印`).join('、'))));
     tiles.set(photo.id, tile);
     return tile;
   });
@@ -168,13 +170,22 @@ function thumbnails(scope) {
 
 function folderPhotoList(ctx, folder, photos, preferences, now, scope) {
   let selected = preferences;
+  let pendingOrder;
+  let pendingPreferences = 0;
   const choose = (key, value) => ctx.guard(async () => {
+    if (pendingOrder) await pendingOrder;
     if (selected[key] === value || !scope.current()) return;
-    await db.updatePhotoPreferences({ [key]: value });
-    const saved = await db.getPhotoPreferences();
-    if (!scope.current()) return;
-    selected = saved;
-    update(new Date());
+    cancelReorder();
+    pendingPreferences++;
+    try {
+      await db.updatePhotoPreferences({ [key]: value });
+      const saved = await db.getPhotoPreferences();
+      if (!scope.current()) return;
+      selected = saved;
+      update(new Date());
+    } finally {
+      pendingPreferences--;
+    }
   });
   const sorts = PHOTO_SORTS.map(({ id, label }) => el('button', {
     type: 'button', className: 'sort-choice', 'data-sort': id, onclick: choose('sort', id)
@@ -189,6 +200,7 @@ function folderPhotoList(ctx, folder, photos, preferences, now, scope) {
     }, tagDot(tag)))
   ];
   const status = el('p', { className: 'photo-filter-status', role: 'status' });
+  const hint = el('p', { className: 'photo-reorder-hint' }, '長押しすると、写真を動かせます');
   const tiles = el('ul', { className: 'tiles' });
   const getTiles = thumbnails(scope);
   const empty = el('p', { className: 'empty' },
@@ -205,8 +217,31 @@ function folderPhotoList(ctx, folder, photos, preferences, now, scope) {
       tagDot(tag), `（${visible.length}枚）`);
     tiles.hidden = visible.length === 0;
     tiles.replaceChildren(...getTiles(visible));
+    hint.hidden = tiles.hidden;
     empty.hidden = !tiles.hidden;
   }
+
+  const saveOrder = ctx.guard(async orderedIds => {
+    try {
+      await db.reorderPhotos(folder.id, orderedIds);
+      if (!scope.current()) return;
+      const positions = new Map(orderedIds.map((id, position) => [id, position]));
+      for (const photo of photos) photo.position = positions.get(photo.id);
+      selected = { ...selected, sort: 'manual' };
+    } catch (error) {
+      if (scope.current()) ctx.refresh();
+      throw error;
+    } finally {
+      pendingOrder = undefined;
+      if (scope.current()) update(new Date());
+    }
+  });
+  const cancelReorder = enablePhotoReorder(tiles, {
+    ready: () => !pendingOrder && pendingPreferences === 0,
+    filtered: () => selected.filter !== 'all',
+    onBlocked: () => ctx.notify('順番を変えるときは、しぼりこみを「すべて」にしてください。'),
+    onDrop(orderedIds) { pendingOrder = saveOrder(orderedIds); }
+  }, scope);
 
   update(now);
   return el('section', { className: 'section folder-card' },
@@ -216,7 +251,7 @@ function folderPhotoList(ctx, folder, photos, preferences, now, scope) {
       el('div', { className: 'photo-filter-controls', role: 'group', 'aria-labelledby': 'photo-filter-label' },
         el('span', { id: 'photo-filter-label' }, 'しぼりこみ'),
         el('div', { className: 'photo-filter-options' }, filters))),
-    status, tiles, empty);
+    status, hint, tiles, empty);
 }
 
 export async function renderFolder(ctx, id, scope) {

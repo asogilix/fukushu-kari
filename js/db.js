@@ -104,15 +104,17 @@ export const getSetting = async id => (await read('settings', id))?.value;
 export const setSetting = (id, value) => put('settings', { id, value });
 export const getPhotoPreferences = async () => normalizePhotoPreferences(await getSetting(PHOTO_PREFERENCES));
 
+function storePhotoPreferences(tx, changes) {
+  const settings = tx.objectStore('settings');
+  const find = settings.get(PHOTO_PREFERENCES);
+  find.onsuccess = () => {
+    const value = normalizePhotoPreferences({ ...find.result?.value, ...changes });
+    settings.put({ id: PHOTO_PREFERENCES, value });
+  };
+}
+
 export function updatePhotoPreferences(changes) {
-  return run(['settings'], 'readwrite', tx => {
-    const settings = tx.objectStore('settings');
-    const find = settings.get(PHOTO_PREFERENCES);
-    find.onsuccess = () => {
-      const value = normalizePhotoPreferences({ ...find.result?.value, ...changes });
-      settings.put({ id: PHOTO_PREFERENCES, value });
-    };
-  });
+  return run(['settings'], 'readwrite', tx => storePhotoPreferences(tx, changes));
 }
 
 export function createFolder({ id, name, createdAt, parentId = null }) {
@@ -188,8 +190,28 @@ export function updatePhoto(id, changes) {
       }
       const folder = tx.objectStore('folders').get(patch.folderId);
       folder.onsuccess = () => {
-        photos.put({ ...find.result, ...patch, folderId: folder.result ? patch.folderId : DEFAULT_FOLDER });
+        const folderId = folder.result ? patch.folderId : DEFAULT_FOLDER;
+        const updated = { ...find.result, ...patch, folderId };
+        if (folderId !== find.result.folderId) delete updated.position;
+        photos.put(updated);
       };
+    };
+  });
+}
+
+export function reorderPhotos(folderId, orderedIds) {
+  return run(['photos', 'settings'], 'readwrite', (tx, _capture, abort) => {
+    const photos = tx.objectStore('photos');
+    const all = photos.getAll();
+    all.onsuccess = () => {
+      const inFolder = new Map(all.result.filter(photo => photo.folderId === folderId).map(photo => [photo.id, photo]));
+      const ids = new Set(orderedIds);
+      if (ids.size !== orderedIds.length || ids.size !== inFolder.size || orderedIds.some(id => !inFolder.has(id))) {
+        abort(new Error('写真の一覧が変わりました。'));
+        return;
+      }
+      orderedIds.forEach((id, position) => photos.put({ ...inFolder.get(id), position }));
+      storePhotoPreferences(tx, { sort: 'manual' });
     };
   });
 }
@@ -264,7 +286,9 @@ export function deleteFolder(id, keepPhotos) {
         const photo = cursor.value;
         if (branch.has(photo.folderId)) {
           if (keepPhotos) {
-            cursor.update({ ...photo, folderId: destination });
+            const moved = { ...photo, folderId: destination };
+            delete moved.position;
+            cursor.update(moved);
           } else {
             cursor.delete();
             images.delete(photo.id);

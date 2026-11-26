@@ -33,6 +33,14 @@ test('開いた写真がしぼりこみの外にあれば、しぼりこみを�
   assert.deepEqual(viewerPhotoIds([], current, { sort: 'oldest', filter: 'all' }, now), ['current']);
 });
 
+test('自分の順では全画面でもフォルダ内の指定順になり、順番がない写真はうしろに並ぶ', () => {
+  const ordered = photos.map(item => item.id === 'newer' ? { ...item, position: 0 } : item);
+  assert.deepEqual(viewerPhotoIds(ordered, current, { sort: 'manual', filter: 'all' }, now),
+    ['newer', 'older', 'current', 'outside-filter']);
+  assert.deepEqual(viewerPhotoIds(ordered, current, { sort: 'manual', filter: 'star' }, now),
+    ['newer', 'older', 'current']);
+});
+
 test('前と次の位置を返し、一覧の両端と1枚だけのときは範囲を越えない', () => {
   assert.equal(adjacentIndex(1, 3, -1), 0);
   assert.equal(adjacentIndex(1, 3, 1), 2);

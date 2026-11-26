@@ -12,6 +12,7 @@ self.APP_ASSETS = [
   "js/import.js",
   "js/library.js",
   "js/photo-options.js",
+  "js/photo-reorder.js",
   "js/photo-viewer-logic.js",
   "js/photo-viewer.js",
   "js/review.js",
@@ -231,4 +232,4 @@ self.APP_ASSETS = [
   "vendor/zen-maru-gothic/ZenMaruGothic-Bold.woff2",
   "vendor/zen-maru-gothic/ZenMaruGothic-Medium.woff2"
 ];
-self.APP_CACHE_VERSION = 'a876cb45be3a65cc';
+self.APP_CACHE_VERSION = '5d21b144d8076d39';
